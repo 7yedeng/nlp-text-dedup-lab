@@ -88,14 +88,30 @@ def main(argv):
     paths = argv[1:] or []
     if not paths:
         base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        outd = os.path.join(base, "out")
-        # 默认检查两份交付文档：学校提交版 + 公开脱敏版
+        # 报告可能在：本项目 out/、本项目 提交材料/，或整理成包后的 01_提交材料/
+        dirs = [os.path.join(base, "out"), os.path.join(base, "提交材料")]
+        up = base
+        for _ in range(4):
+            up = os.path.dirname(up)
+            if not up or up == os.path.dirname(up):
+                break
+            dirs.append(os.path.join(up, "01_提交材料"))
+            dirs.append(os.path.join(up, "提交材料"))
+        # 只检查**报告**（不含老师的作业文档等）
         cand = []
-        if os.path.isdir(outd):
-            for f in sorted(os.listdir(outd)):
-                if f.endswith(".docx") and not f.startswith("~$"):
-                    cand.append(os.path.join(outd, f))
-        paths = cand or [os.path.join(outd, "第1次实验报告.docx")]
+        for d in dirs:
+            if not os.path.isdir(d):
+                continue
+            for f in sorted(os.listdir(d)):
+                if f.endswith(".docx") and not f.startswith("~$") \
+                        and "实验报告" in f:
+                    p = os.path.join(d, f)
+                    if p not in cand:
+                        cand.append(p)
+        paths = cand
+        if not paths:
+            print("未找到任何报告 docx（检查过：%s）" % ", ".join(dirs))
+            return 1
     total = 0
     for p in paths:
         if not os.path.exists(p):

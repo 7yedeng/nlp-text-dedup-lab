@@ -161,35 +161,51 @@ def main():
                       "报告主表突出等权与加权两行；完整消融移至附录"))
 
     # ---------------- 提交要求 ----------------
-    _cands = [f for f in sorted(os.listdir(OUT))
-              if f.endswith("第1次实验报告.docx") and not f.startswith("~$")
-              and "脱敏" not in f] if os.path.isdir(OUT) else []
-    rep = os.path.join(OUT, _cands[0]) if _cands else os.path.join(OUT, "第1次实验报告.docx")
-    _name_ok = bool(_cands) and _cands[0].count("+") >= 3     # 姓名+学号+姓名+学号+…
+    # 提交材料可能位于：本项目 out/、本项目 提交材料/、
+    # 或整理成「NLP第一次实验」包后的 01_提交材料/（在包的顶层，需向上找几级）
+    _SUB_DIRS = [OUT, os.path.join(ROOT, "提交材料")]
+    _up = ROOT
+    for _ in range(4):
+        _up = os.path.dirname(_up)
+        if not _up or _up == os.path.dirname(_up):
+            break
+        _SUB_DIRS.append(os.path.join(_up, "01_提交材料"))
+        _SUB_DIRS.append(os.path.join(_up, "提交材料"))
+
+    def find_sub(suffix, exclude=()):
+        for d in _SUB_DIRS:
+            if not os.path.isdir(d):
+                continue
+            for fn in sorted(os.listdir(d)):
+                if fn.endswith(suffix) and not fn.startswith("~$") \
+                        and not any(x in fn for x in exclude):
+                    return os.path.join(d, fn), fn
+        return None, None
+
+    _rep_path, _rep_name = find_sub("第1次实验报告.docx", exclude=("脱敏",))
+    _name_ok = bool(_rep_name) and _rep_name.count("+") >= 3   # 姓名+学号+姓名+学号+…
     items.append(("提交", "Word 实验报告",
-                  os.path.exists(rep), os.path.basename(rep)))
+                  bool(_rep_path), _rep_name or "未找到"))
     items.append(("提交", "报告命名：姓名+学号（双人）+第1次实验报告.docx",
-                  _name_ok, os.path.basename(rep)))
+                  _name_ok, _rep_name or "未找到"))
     items.append(("提交", "含实验目的",
                   check_text("tools/build_report.py", r"实验目的") is not None, "各节 x.1"))
     items.append(("提交", "含加权 SimHash 算法原理",
                   check_text("tools/build_report.py", r"算法原理（加权 SimHash）") is not None,
                   "4.2.2 节"))
-    items.append(("提交", "含关键代码白底截图",
-                  len([f for f in os.listdir(os.path.join(OUT, "screenshots"))
-                       if f.endswith(".png")]) >= 8,
-                  f"{len([f for f in os.listdir(os.path.join(OUT, 'screenshots')) if f.endswith('.png')])} 张"))
+    _shots = [f for f in os.listdir(os.path.join(OUT, "screenshots"))
+              if f.endswith(".png")] if os.path.isdir(os.path.join(OUT, "screenshots")) else []
+    items.append(("提交", "含关键代码白底截图", len(_shots) >= 8, f"{len(_shots)} 张"))
     items.append(("提交", "含查准率/查全率/F1 表格",
                   check_text("tools/build_report.py", r"查准率") is not None, "4.2.5 节表格"))
-    items.append(("提交", "含可视化结果",
-                  len(os.listdir(os.path.join(OUT, "figures"))) >= 4,
-                  f"{len(os.listdir(os.path.join(OUT, 'figures')))} 张图"))
+    _figs = [f for f in os.listdir(os.path.join(OUT, "figures"))] \
+        if os.path.isdir(os.path.join(OUT, "figures")) else []
+    items.append(("提交", "含可视化结果", len(_figs) >= 4, f"{len(_figs)} 张图"))
     items.append(("提交", "含实验学习笔记",
                   check_text("tools/build_report.py", r"实验学习笔记") is not None, "第五节"))
-    _sub = os.path.join(ROOT, "提交材料")
-    _zips = [f for f in os.listdir(_sub) if f.endswith("-代码.zip")] if os.path.isdir(_sub) else []
+    _zp, _zn = find_sub("-代码.zip")
     items.append(("提交", "代码压缩包（不含第三方库与大模型）",
-                  bool(_zips), "提交材料/" + (_zips[0] if _zips else "…-代码.zip")))
+                  bool(_zp), _zn or "未找到"))
 
     # ---------------- 输出 ----------------
     print("=" * 78)
