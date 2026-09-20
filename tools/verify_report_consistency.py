@@ -32,7 +32,19 @@ from docx import Document
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 OUT = os.path.join(ROOT, "out")
-REPORT = os.path.join(OUT, "<成员一姓名>+<成员一学号>+第1次实验报告.docx")
+
+
+def _find_report():
+    """自动定位学校提交版报告（文件名含双人姓名学号，故用约定后缀匹配）。"""
+    if not os.path.isdir(OUT):
+        return os.path.join(OUT, "第1次实验报告.docx")
+    cands = [f for f in sorted(os.listdir(OUT))
+             if f.endswith("第1次实验报告.docx") and not f.startswith("~$")
+             and "脱敏" not in f]
+    return os.path.join(OUT, cands[0]) if cands else os.path.join(OUT, "第1次实验报告.docx")
+
+
+REPORT = _find_report()
 
 HISTORICAL_NUMBERS = ["91.87", "713.32", "30.52"]
 # 允许出现历史数字的段落必须同时包含这些词之一（即明确标注为“初版/历史/错误记录”）

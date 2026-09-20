@@ -85,7 +85,14 @@ def main(argv):
     paths = argv[1:] or []
     if not paths:
         base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        paths = [os.path.join(base, "out", "<成员一姓名>+<成员一学号>+第1次实验报告.docx")]
+        outd = os.path.join(base, "out")
+        # 默认检查两份交付文档：学校提交版 + 公开脱敏版
+        cand = []
+        if os.path.isdir(outd):
+            for f in sorted(os.listdir(outd)):
+                if f.endswith(".docx") and not f.startswith("~$"):
+                    cand.append(os.path.join(outd, f))
+        paths = cand or [os.path.join(outd, "第1次实验报告.docx")]
     total = 0
     for p in paths:
         if not os.path.exists(p):

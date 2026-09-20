@@ -21,7 +21,7 @@ DATA = os.path.join(BASE, "data")
 OUTDIR = os.path.join(BASE, "提交材料")
 os.makedirs(OUTDIR, exist_ok=True)
 
-NAME = "<成员一姓名>+<成员一学号>"
+NAME = "<成员一姓名>+<成员一学号>+<成员二姓名>+<成员二学号>"
 CATS = [("sports", "体育"), ("tech", "科技"), ("ent", "娱乐")]
 
 # 抓取入口（与 tools/scraper.py、tools/fetch_titles.py 中的实现一致）
