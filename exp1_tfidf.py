@@ -20,6 +20,7 @@
 """
 import os
 import re
+import json
 from collections import Counter
 
 import jieba
@@ -183,6 +184,52 @@ def main():
         f.write("=== 词频最高20词及其平均 TF-IDF 权重 ===\n")
         for w, fr, wgt, ok in zip(top20_words, (freq[w] for w in top20_words), tfidf_weights, in_vocab):
             f.write(f"{w}\t词频={fr}\t平均TF-IDF={wgt:.4f}\t进入特征集={'是' if ok else '否'}\n")
+
+    # 5b) 结构化汇总（供报告生成器读取，杜绝报告里硬编码数字）
+    # 额外做一次「模板化标题」统计：修正语料规范化后，Top-10 全部由模板内容占据，
+    # 这个占比必须由数据算出并落盘，而不是写在报告里。
+    TEMPLATE_PATTERNS = {
+        "微博观影团抢票": r"微博观影团.*首映.*抢票",
+        "彩票预测类": r"(双色球|福彩3D|大乐透|排列[35]).*(预测|奖号|推荐|参考|中奖)",
+        "竞彩/指数类": r"(小炮APP|新浪彩票|竞彩|盈亏指数|冷热指数|亚盘|足彩)",
+        "影迷评": r"影迷评《",
+        "公司增持/减持": r"获.{0,12}增持|减持.{0,12}万股",
+    }
+    template_counts = {name: sum(1 for t in titles if re.search(pat, t))
+                       for name, pat in TEMPLATE_PATTERNS.items()}
+    n_template = sum(1 for t in titles
+                     if any(re.search(p, t) for p in TEMPLATE_PATTERNS.values()))
+    top10_templated = sum(1 for _, i, j in pairs
+                          if any(re.search(p, titles[i]) or re.search(p, titles[j])
+                                 for p in TEMPLATE_PATTERNS.values()))
+    n_uni = int(sum(1 for f in feats if " " not in str(f)))   # 1-gram 特征数（无空格）
+
+    summary = {
+        "raw_scale": len(raw_titles),
+        "scale": len(titles),
+        "removed_dup": n_removed,
+        "matrix_shape": list(X.shape),
+        "n_1gram": int(n_uni), "n_2gram": int(len(feats) - n_uni),
+        "similarity": dist,
+        "top10": [{"rank": k + 1, "sim": float(s), "i": int(i), "j": int(j),
+                   "text_i": titles[i], "text_j": titles[j]} for k, (s, i, j) in enumerate(pairs)],
+        "top10_ge_0_3": n_redundant,
+        "top20_words": [{"word": w, "freq": int(freq[w]), "weight": float(wg),
+                         "in_vocab": bool(ok)}
+                        for w, wg, ok in zip(top20_words, tfidf_weights, in_vocab)],
+        "n_oov_in_top20": n_oov,
+        "template_stats": {"patterns": TEMPLATE_PATTERNS, "counts": template_counts,
+                           "n_template": n_template,
+                           "ratio": n_template / len(titles) if titles else 0.0,
+                           "top10_templated": top10_templated},
+        "config": {"max_features": 1000, "ngram_range": [1, 2],
+                   "token_pattern": r"(?u)\b\w+\b", "lowercase": True},
+    }
+    with open(os.path.join(OUT, "results_summary_tfidf.json"), "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=1)
+    print(f"    模板化标题 {n_template}/{len(titles)} ({n_template/len(titles):.2%})；"
+          f"Top-10 中模板对 {top10_templated}/10")
+    print("已落盘: out/results_summary_tfidf.json")
 
     # 6) 可视化：词频最高20个词的 TF-IDF 权重柱状图
     fig, ax = plt.subplots(figsize=(10, 7))

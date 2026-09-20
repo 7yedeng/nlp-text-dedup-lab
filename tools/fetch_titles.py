@@ -14,6 +14,7 @@ if os.path.exists(fp):
     with open(fp, encoding="utf-8") as f:
         existing = [ln.strip() for ln in f if ln.strip()]
 seen = set(existing)
+first_seen_order = list(existing)
 
 # 1) 新浪滚动 API：多种 lid 频道
 lids = [2509, 2510, 2511, 2512, 2513, 2514, 2515, 2516, 2669, 2050]
@@ -27,7 +28,7 @@ for lid in lids:
             for it in data:
                 t = (it.get("title") or "").strip()
                 if t and t not in seen:
-                    seen.add(t)
+                    seen.add(t); first_seen_order.append(t)
         except Exception as e:
             print("ERR lid", lid, page, e)
             break
@@ -48,12 +49,36 @@ for ch in channels:
         for it in data:
             t = (it.get("title") or "").strip()
             if t and t not in seen:
-                seen.add(t); n += 1
+                seen.add(t); first_seen_order.append(t); n += 1
         print(f"netease {ch}: +{n} (total {len(seen)})")
     except Exception as e:
         print(f"netease {ch}: ERR {e}")
 
+# 【L1 修正】初版直接遍历 set 写文件，顺序由 Python 的字符串哈希随机化决定，
+# 重新抓取时同一批标题的顺序会变，进而改变文档编号与并列 Top-10 的先后。
+# 现在：
+#   1) 保留"首次出现顺序"（seen 只用于判重），并按该顺序写盘；
+#   2) 额外写出抓取时间与来源映射，便于区分"固定快照重算"与"重新联网抓取"。
+import datetime
+
+ordered = [t for t in first_seen_order if t in seen]
 with open(fp, "w", encoding="utf-8") as f:
-    for t in seen:
+    for t in ordered:
         f.write(t + "\n")
-print("FINAL titles:", len(seen))
+
+stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+meta = {
+    "generated_at": stamp,
+    "n_titles": len(ordered),
+    "sina_lids": lids,
+    "netease_channels": channels,
+    "output_order": "first_seen",
+    "note": ("标题顺序按首次出现顺序固定；若要严格复现已提交的 data/titles.txt，"
+             "请使用固定快照而不是重新联网抓取——联网抓取的内容会随时间变化。"),
+}
+with open(os.path.join(BASE, "titles_manifest.json"), "w", encoding="utf-8") as f:
+    json.dump(meta, f, ensure_ascii=False, indent=1)
+
+print("FINAL titles:", len(ordered))
+print("抓取时间:", stamp)
+print("已写出:", fp, "与", os.path.join(BASE, "titles_manifest.json"))

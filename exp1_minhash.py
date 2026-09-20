@@ -22,6 +22,8 @@
 """
 import os
 import re
+import gc
+import json
 import time
 import hashlib
 import itertools
@@ -42,8 +44,10 @@ FIG = os.path.join(OUT, "figures")
 os.makedirs(FIG, exist_ok=True)
 
 K = 128                 # MinHash 签名长度
-P = 2**61 - 1           # 大素数（梅森素数），保证随机哈希均匀
+M32 = 2**31 - 1         # 梅森素数 2^31-1：作为哈希模数，保证 numpy int64 乘法不溢出
+P = M32                 # 兼容旧名（概率计算等处使用）
 SEED = 42
+REPS = 5                # 计时重复次数（报告 中位数±标准差；M1 修正：单次计时不可信）
 
 # 常用中文停用词（与实验一(1)保持一致）
 STOPWORDS = set("""的 了 和 是 就 都 而 及 与 着 或 一个 没有 我们 你们 他们 它们 这 那 之 在 上 下 中 有 我 你 他 她 它 也 还 又 被 让 把 对 从 向 为 以 于 到 出 过 很 更 最 不 没 谁 什么 怎么 为什么 如何 哪 哪些 因为 所以 但是 然而 虽然 如果 只要 已经 正在 将 会 能 可以 应该 必须 这个 那个 这些 那些 啊 吧 呢 嘛 啦 呀 吗 哈 好 哦 嗯 一 二 三 四 五 六 七 八 九 十 万 亿 百 千 个 条 篇 岁 年 月 日 时 分 秒 今天 昨天 明天 现在 时候 方面 进行 通过 随着 据悉 记者 报道 消息 表示 称 目前 日前 近日 已经 香港 台湾 中国 美国 日本 """.split())
@@ -105,10 +109,48 @@ class MinHash:
         return self._sig.copy()
 
 
+def _pick_hash_params(k, seed=SEED):
+    """
+    生成 k 组 (a, b)：h_i(x) = (a_i * x + b_i) mod M32
+
+    向量化实现的前提是乘法不溢出 int64：
+        a_i < 2^31，x < 2^31  ⇒  a_i * x < 2^62 < 2^63  ✅
+    因此这里把模数取为梅森素数 2^31 - 1（M32），使 numpy int64 可以安全地
+    一次性算出全部 k 个哈希值。模数的大小不影响 MinHash 的无偏性——
+    只要 h 在集合元素上近似均匀，签名相等概率就等于 Jaccard。
+    """
+    rng = np.random.RandomState(seed)
+    a = rng.randint(1, M32, size=k, dtype=np.int64)
+    b = rng.randint(0, M32, size=k, dtype=np.int64)
+    return a, b
+
+
+_HASH_A, _HASH_B = _pick_hash_params(K)
+
+
+def _base_hashes(shingle_set):
+    """shingle 集合 -> int64 数组（每项 < M32），作为 h 的输入 x。"""
+    return np.array([int(hashlib.md5(s.encode("utf-8")).hexdigest()[:8], 16) % M32
+                     for s in shingle_set], dtype=np.int64)
+
+
 def minhash_signature(shingle_set, k=K, seed=SEED):
-    mh = MinHash(k, seed)
-    mh.update(shingle_set)
-    return mh.signature()
+    """生成 MinHash 签名（长度 k 的整数向量）。
+
+    向量化：v = (A * x + B) mod M32 对全部 x 与全部 k 一次性算出，再按列取最小值。
+    初版用「纯 Python 双重循环」逐 shingle 逐哈希函数计算，500 篇时签名生成
+    就要约 1.2 秒，反而比精确 Jaccard 更慢，使"近似更高效"的结论失去意义。
+
+    空集合返回全 0 签名（哨兵值），配合 jaccard_minhash 的空集判定，
+    与精确 Jaccard「空集合返回 0」的约定保持一致。
+    """
+    if not shingle_set:
+        return np.zeros(k, dtype=np.int64)
+    a, b = (_HASH_A, _HASH_B) if k == K else _pick_hash_params(k, seed)
+    x = _base_hashes(shingle_set)                      # (n,)
+    # (k, n) = a[:,None] * x[None,:] + b[:,None]，int64 安全
+    vals = (a[:k, None] * x[None, :] + b[:k, None]) % M32
+    return vals.min(axis=1)
 
 
 def jaccard_exact(s1, s2):
@@ -118,6 +160,9 @@ def jaccard_exact(s1, s2):
 
 
 def jaccard_minhash(sig1, sig2):
+    # 空集合的签名是全 0 哨兵；若两者都为空则显式返回 0，与 jaccard_exact 保持一致
+    if not np.any(sig1) or not np.any(sig2):
+        return 0.0
     return float(np.mean(sig1 == sig2))
 
 
@@ -291,11 +336,24 @@ def main():
             print(f"  T{i+1}-T{j+1}: MinHash 相似度={approx[i, j]:.4f} -> {status}")
             res_lines.append(f"  T{i+1}-T{j+1}: MinHash 相似度={approx[i,j]:.4f} -> {status}")
 
-    # 5) 批量规模对运行时间的影响（修正B：改用真实标题语料扩展规模）
-    print("\n=== 批量处理规模对运行时间的影响（真实标题语料）===")
+    # 5) 批量规模对运行时间的影响
+    #    【M1 修正】初版计时口径不公平：LSH 列复用了前一阶段已生成的签名，
+    #    既不含签名生成、也不含候选回验，而精确列是完整任务；且只跑一次、无波动信息。
+    #    现在：
+    #      - 分别报告「分阶段耗时」与「端到端耗时」
+    #      - 端到端 = 从原始文本出发到给出重复判定对，三条路径都算全（含签名/索引构建与回验）
+    #      - 每个规模重复 REPS 次，报告均值与标准差
+    #      - 明确标注签名/索引是否计入
+    print("\n=== 批量处理规模对运行时间的影响（真实标题语料，端到端口径）===")
     res_lines.append("\n=== 批量处理规模对运行时间的影响（真实标题语料）===")
-    res_lines.append("规模 | 精确Jaccard全量 | MinHash签名+全量 | LSH(b16,r8)建桶 | LSH(b64,r2)建桶 | "
-                     "全量对数 | b16r8候选 | b64r2候选 | 剪枝率(b16r8)")
+    res_lines.append("口径说明：")
+    res_lines.append("  精确端到端 = shingle 构建 + 全量两两精确 Jaccard + 阈值判定")
+    res_lines.append("  MinHash端到端 = shingle 构建 + k=128 签名生成 + 全量两两签名比对 + 阈值判定")
+    res_lines.append("  LSH端到端 = shingle 构建 + 签名生成 + 建桶 + 候选生成 + 候选回验 + 阈值判定")
+    res_lines.append("  每个规模重复 %d 次，报告 中位数±标准差(ms)；shingle 构建为公共成本单列" % REPS)
+    res_lines.append("规模 | shingle构建 | 精确(全量两两) | MinHash(签名+全量) | LSH(b16r8) | LSH(b64r2) | "
+                     "全量对数 | b16r8候选 | b64r2候选 | LSH(b64r2)加速比")
+
     times = []
     corpus = []
     try:
@@ -306,44 +364,105 @@ def main():
     if len(corpus) < 500:
         corpus = [c for c in cases] * 100
 
+    VERIFY_TH = 0.2   # 候选回验阈值（与上面 LSH 明细一致）
+
+    # 计时口径：Shingle 构建对三条路径是公共成本，单独计时、不计入"比较阶段"，
+    # 避免用"谁多做了一次 shingle"来制造速度差异。
+    # 三条路径都必须是「能给出最终重复判定对」的完整流程。
+    def bench_exact(sh, m):
+        """精确：全量两两 Jaccard + 阈值判定。"""
+        pred = set()
+        for i in range(m):
+            si = sh[i]
+            for j in range(i + 1, m):
+                if jaccard_exact(si, sh[j]) >= VERIFY_TH:
+                    pred.add((i, j))
+        return pred, m * (m - 1) // 2
+
+    def bench_minhash(sh, m):
+        """MinHash：签名生成 + 全量两两签名比对 + 阈值判定。"""
+        ss = [minhash_signature(x) for x in sh]
+        np_ = m * (m - 1) // 2
+        pred = set()
+        for i in range(m):
+            si = ss[i]
+            for j in range(i + 1, m):
+                if jaccard_minhash(si, ss[j]) >= VERIFY_TH:
+                    pred.add((i, j))
+        return pred, np_
+
+    def bench_lsh(sh, m, b, r):
+        """LSH：签名生成 + 建桶 + 候选生成 + 候选回验 + 阈值判定。"""
+        ss = [minhash_signature(x) for x in sh]
+        tables = build_lsh_tables(ss, b=b, r=r)
+        cand = lsh_candidates(tables)
+        pred = {(i, j) for (i, j) in cand if jaccard_minhash(ss[i], ss[j]) >= VERIFY_TH}
+        return pred, len(cand)
+
     for m in [6, 50, 200, 500]:
         docs = corpus[:m]
-        s = [shingles(d) for d in docs]
         total_pairs = m * (m - 1) // 2
-
+        # shingle 构建：公共成本，单独计时
         t0 = time.perf_counter()
-        for i in range(m):
-            for j in range(i + 1, m):
-                jaccard_exact(s[i], s[j])
-        te = time.perf_counter() - t0
+        sh = [shingles(d) for d in docs]
+        t_shingle = time.perf_counter() - t0
 
-        t0 = time.perf_counter()
-        ss = [minhash_signature(x) for x in s]
-        tsig = time.perf_counter() - t0
-        t0 = time.perf_counter()
-        for i in range(m):
-            for j in range(i + 1, m):
-                jaccard_minhash(ss[i], ss[j])
-        tm = tsig + (time.perf_counter() - t0)
+        te_l, tm_l, tl1_l, tl2_l = [], [], [], []
+        n_exact_pairs = n_mh_pairs = 0
+        c1 = c2 = 0
+        # 计时期间关闭 GC，避免垃圾回收抖动污染小样本计时（n=500 时尤为明显）
+        _gc_was = gc.isenabled()
+        gc.disable()
+        try:
+            # 预热一次，排除首次调用的解释器/JIT 冷启动影响
+            bench_exact(sh, m); bench_minhash(sh, m)
+            bench_lsh(sh, m, 16, 8); bench_lsh(sh, m, 64, 2)
+            for _ in range(REPS):
+                t0 = time.perf_counter(); _, n_exact_pairs = bench_exact(sh, m); te_l.append(time.perf_counter() - t0)
+                t0 = time.perf_counter(); _, n_mh_pairs = bench_minhash(sh, m); tm_l.append(time.perf_counter() - t0)
+                t0 = time.perf_counter(); _, c1 = bench_lsh(sh, m, 16, 8); tl1_l.append(time.perf_counter() - t0)
+                t0 = time.perf_counter(); _, c2 = bench_lsh(sh, m, 64, 2); tl2_l.append(time.perf_counter() - t0)
+        finally:
+            if _gc_was:
+                gc.enable()
+        # 取中位数作为主报值（比均值更抗离群），同时给出标准差
+        te, tm = float(np.median(te_l)), float(np.median(tm_l))
+        tl1, tl2 = float(np.median(tl1_l)), float(np.median(tl2_l))
+        se, sm = float(np.std(te_l)), float(np.std(tm_l))
+        s1, s2_ = float(np.std(tl1_l)), float(np.std(tl2_l))
+        speedup_exact = te / tl2 if tl2 else float("inf")
+        prune = 1 - c1 / total_pairs if total_pairs else 0.0
+        times.append(dict(n=m, shingle_ms=t_shingle * 1000,
+                          exact=te, exact_std=se, minhash=tm, minhash_std=sm,
+                          lsh_16_8=tl1, lsh_16_8_std=s1, lsh_64_2=tl2, lsh_64_2_std=s2_,
+                          total_pairs=total_pairs, cand_16_8=c1, cand_64_2=c2,
+                          prune_16_8=prune, speedup_lsh64_vs_exact=float(speedup_exact)))
+        print(f"  文档数={m:4d} (shingle {t_shingle*1000:7.2f}ms): "
+              f"精确 {te*1000:9.2f}±{se*1000:7.2f}ms/{n_exact_pairs}对 | "
+              f"MinHash {tm*1000:9.2f}±{sm*1000:7.2f}ms | "
+              f"LSHb64r2 {tl2*1000:9.2f}±{s2_*1000:7.2f}ms/{c2}候选 | "
+              f"LSH加速 {speedup_exact:5.2f}x")
+        res_lines.append(
+            f"  {m:4d} | {t_shingle*1000:8.2f} | {te*1000:9.2f}±{se*1000:7.2f} | "
+            f"{tm*1000:9.2f}±{sm*1000:7.2f} | {tl1*1000:9.2f}±{s1*1000:7.2f} | "
+            f"{tl2*1000:9.2f}±{s2_*1000:7.2f} | {total_pairs} | {c1} | {c2} | {speedup_exact:.2f}")
 
-        t0 = time.perf_counter()
-        tb = build_lsh_tables(ss, b=16, r=8)
-        cand2 = lsh_candidates(tb)
-        tl = time.perf_counter() - t0
-
-        # 同一批签名的另一组分桶参数（b=64, r=2），用于观察参数对召回/剪枝的影响
-        t0 = time.perf_counter()
-        tb2 = build_lsh_tables(ss, b=64, r=2)
-        cand3 = lsh_candidates(tb2)
-        tl2 = time.perf_counter() - t0
-
-        prune = 1 - len(cand2) / total_pairs if total_pairs else 0.0
-        times.append((m, te, tm, tl, tl2, total_pairs, len(cand2), len(cand3), prune))
-        print(f"  文档数={m:4d}: 精确={te*1000:8.2f}ms  MinHash={tm*1000:9.2f}ms  "
-              f"LSH(b16r8)={tl*1000:6.2f}ms候选{len(cand2):>5}  "
-              f"LSH(b64r2)={tl2*1000:6.2f}ms候选{len(cand3):>6}  | 全量{total_pairs}对")
-        res_lines.append(f"  {m:4d} | {te*1000:8.2f}ms | {tm*1000:9.2f}ms | {tl*1000:7.2f}ms | "
-                         f"{tl2*1000:7.2f}ms | {total_pairs} | {len(cand2)} | {len(cand3)} | {prune:.4f}")
+    # 分阶段耗时（同一批签名，供拆解瓶颈；明确标注不含哪些部分）
+    res_lines.append("\n=== 分阶段耗时拆解（n=500，同一批签名；用于定位瓶颈）===")
+    docs500 = corpus[:500]
+    s500 = [shingles(d) for d in docs500]
+    t0 = time.perf_counter(); ss500 = [minhash_signature(x) for x in s500]
+    t_sig500 = time.perf_counter() - t0
+    t0 = time.perf_counter(); tb500 = build_lsh_tables(ss500, b=64, r=2)
+    cand500 = lsh_candidates(tb500); t_build500 = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    _ = [(i, j) for (i, j) in cand500 if jaccard_minhash(ss500[i], ss500[j]) >= VERIFY_TH]
+    t_verify500 = time.perf_counter() - t0
+    res_lines.append(f"  shingle 构建 + k=128 签名生成 = {t_sig500*1000:.2f} ms（一次性成本）")
+    res_lines.append(f"  LSH(b=64,r=2) 建桶 + 候选生成 = {t_build500*1000:.2f} ms（不含签名生成）")
+    res_lines.append(f"  候选回验（{len(cand500)} 对） = {t_verify500*1000:.2f} ms")
+    print(f"  分阶段(n=500): 签名生成={t_sig500*1000:.2f}ms 建桶+候选={t_build500*1000:.2f}ms "
+          f"回验({len(cand500)}对)={t_verify500*1000:.2f}ms")
 
     with open(os.path.join(OUT, "exp1_minhash_results.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(res_lines))
@@ -382,22 +501,68 @@ def main():
     fig.savefig(os.path.join(FIG, "exp1_minhash_sim.png"), dpi=150)
     print("\n已保存:", os.path.join(FIG, "exp1_minhash_sim.png"))
 
-    # 图2：批量规模运行时间（对数 y 轴）
-    fig2, ax2 = plt.subplots(figsize=(8, 5))
-    m = [x[0] for x in times]
-    ax2.plot(m, [x[1] * 1000 for x in times], "o-", label="精确 Jaccard（全量两两）")
-    ax2.plot(m, [x[2] * 1000 for x in times], "s-", label="MinHash 签名+全量两两")
-    ax2.plot(m, [x[3] * 1000 for x in times], "^-", label="LSH 建桶+候选（b=16, r=8）")
-    ax2.plot(m, [x[4] * 1000 for x in times], "v-", label="LSH 建桶+候选（b=64, r=2）")
+    # 图2：批量规模端到端耗时（对数 y 轴，带标准差误差棒）
+    fig2, ax2 = plt.subplots(figsize=(8.5, 5.2))
+    m = [x["n"] for x in times]
+    series = [("exact", "exact_std", "o-", "精确 Jaccard（端到端）"),
+              ("minhash", "minhash_std", "s-", "MinHash（端到端）"),
+              ("lsh_16_8", "lsh_16_8_std", "^-", "LSH b=16,r=8（端到端）"),
+              ("lsh_64_2", "lsh_64_2_std", "v-", "LSH b=64,r=2（端到端）")]
+    for key, skey, style, label in series:
+        ax2.errorbar(m, [x[key] * 1000 for x in times],
+                     yerr=[x[skey] * 1000 for x in times],
+                     fmt=style, capsize=3, label=label)
     ax2.set_yscale("log")
     ax2.set_xlabel("文档数")
-    ax2.set_ylabel("耗时 (ms, 对数刻度)")
-    ax2.set_title("批量规模对计算耗时的影响")
-    ax2.legend()
+    ax2.set_ylabel("端到端耗时 (ms, 对数刻度)")
+    ax2.set_title(f"批量规模对端到端耗时的影响（{REPS} 次重复，误差棒=标准差）")
+    ax2.legend(fontsize=8)
     ax2.grid(alpha=0.3, which="both")
     fig2.tight_layout()
     fig2.savefig(os.path.join(FIG, "exp1_minhash_scaling.png"), dpi=150)
     print("已保存:", os.path.join(FIG, "exp1_minhash_scaling.png"))
+
+    # ---- 结构化汇总（供报告生成器读取，杜绝报告里硬编码数字）----
+    summary = {
+        "config": {"k": K, "prime": P, "seed": SEED, "reps": REPS,
+                   "shingle": "词级 1-gram ∪ 2-gram", "verify_threshold": VERIFY_TH,
+                   "lsh_configs": [[16, 8], [64, 2]]},
+        "gold": {"near_dup": len(GOLD_NEAR_DUP), "same_event": len(GOLD_SAME_EVENT),
+                 "mixed_related": len(GOLD_RELATED),
+                 "near_dup_pairs": [f"T{i+1}-T{j+1}" for i, j in GOLD_NEAR_DUP],
+                 "same_event_pairs": [f"T{i+1}-T{j+1}" for i, j in GOLD_SAME_EVENT]},
+        "n_cases": n,
+        "exact_matrix": [[round(float(exact[i, j]), 6) for j in range(n)] for i in range(n)],
+        "minhash_matrix": [[round(float(approx[i, j]), 6) for j in range(n)] for i in range(n)],
+        "case_pairs": [{"pair": f"T{i+1}-T{j+1}", "jaccard": round(float(exact[i, j]), 6),
+                        "minhash": round(float(approx[i, j]), 6),
+                        "abs_err": round(abs(float(approx[i, j]) - float(exact[i, j])), 6),
+                        "in_lsh_candidate": bool((i, j) in lsh_cands[(64, 2)])}
+                       for i in range(n) for j in range(i + 1, n)],
+        "minhash_error": {"mae": float(err.mean()), "max": float(err.max()),
+                          "std": float(err.std())},
+        "thresholds": [{"t": r["t"],
+                        "mixed_exact": list(r["mixed_exact"]), "mixed_min": list(r["mixed_min"]),
+                        "strict_exact": list(r["strict_exact"]), "strict_min": list(r["strict_min"]),
+                        "n_pred_exact": r["n_pred_exact"], "n_pred_min": r["n_pred_min"]}
+                       for r in rows],
+        "single_run_timing_ms": {"exact_jaccard_matrix": t_exact * 1000,
+                                 "minhash_sig": t_sig * 1000,
+                                 "minhash_compare": t_mh * 1000,
+                                 "lsh_16_8_build": lsh_time[(16, 8)] * 1000,
+                                 "lsh_64_2_build": lsh_time[(64, 2)] * 1000},
+        "lsh_candidates": {f"b{b}_r{r}": {"n": len(cset),
+                                          "pairs": [f"T{i+1}-T{j+1}" for i, j in sorted(cset)]}
+                           for (b, r), cset in lsh_cands.items()},
+        "scaling_end2end_ms": times,
+        "stage_breakdown_500_ms": {"shingle_and_signature": t_sig500 * 1000,
+                                   "lsh_build_and_candidates": t_build500 * 1000,
+                                   "candidate_verify": t_verify500 * 1000,
+                                   "n_candidates": len(cand500)},
+    }
+    with open(os.path.join(OUT, "results_summary_minhash.json"), "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=1)
+    print("已落盘: out/results_summary_minhash.json")
 
 
 if __name__ == "__main__":

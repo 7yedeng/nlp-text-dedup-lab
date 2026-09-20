@@ -34,6 +34,10 @@ os.makedirs(FIG, exist_ok=True)
 
 STOPWORDS = set("""的 了 和 是 就 都 而 及 与 着 或 一个 没有 我们 你们 他们 它们 这 那 之 在 上 下 中 有 我 你 他 她 它 也 还 又 被 让 把 对 从 向 为 以 于 到 出 过 很 更 最 不 没 谁 什么 怎么 为什么 如何 哪 哪些 因为 所以 但是 然而 虽然 如果 只要 已经 正在 将 会 能 可以 应该 必须 这个 那个 这些 那些 啊 吧 呢 嘛 啦 呀 吗 哈 好 哦 嗯 一 二 三 四 五 六 七 八 九 十 万 亿 百 千 个 条 篇 岁 年 月 日 时 分 秒 今天 昨天 明天 现在 时候 方面 进行 通过 随着 据悉 记者 报道 消息 表示 称 目前 日前 近日 已经 香港 台湾 中国 美国 日本 """.split())
 
+# 文档向量是否做 L2 归一化（见 doc_vector 的 M5 说明）。
+# 归一化后 KMeans 的欧氏距离与余弦相似度排序等价，口径统一。
+NORMALIZE_DOCVEC = True
+
 
 def parse_doc(raw):
     """解析统一的新闻文件格式，返回 (title, source, category, body)。
@@ -84,10 +88,15 @@ def load_docs(category):
     return docs
 
 
-def doc_vector(words, wv):
+def doc_vector(words, wv, normalize=True):
     """词向量平均池化（Doc2Vec 平均）：只累加词表中存在的词向量。
 
     返回 (向量, 命中词数, 总词数)；向量为 None 表示全部词都在词表外。
+
+    【M5 说明】增加可选的 L2 归一化。归一化后「余弦相似度」与「欧氏距离」
+    在排序上等价（KMeans 在单位球面上做欧氏聚类），
+    这样"可视化用的余弦可分性"与"聚类用的距离"才是同一口径。
+    报告中同时给出归一化开关的实际取值，避免口径混用。
     """
     vecs = []
     for w in words:
@@ -95,7 +104,12 @@ def doc_vector(words, wv):
             vecs.append(wv[w])
     if not vecs:
         return None, 0, len(words)
-    return np.mean(vecs, axis=0), len(vecs), len(words)
+    v = np.mean(vecs, axis=0)
+    if normalize:
+        n = np.linalg.norm(v)
+        if n > 0:
+            v = v / n
+    return v, len(vecs), len(words)
 
 
 def main():
@@ -109,25 +123,36 @@ def main():
     # ---------- 1) 语义推理：词向量运算 ----------
     print("\n=== 语义推理（类比推理）===")
     lines.append("\n=== 语义推理（类比推理）===")
+    # 【M5 修正】类比方向必须与关系类型匹配。
+    # 关系「男→女」对应「国王→王后」：国王 - 男人 + 女人 ≈ 王后  ✅
+    # 但「父亲→儿子」是辈分关系、「母亲→女儿」也是辈分关系，正确写法是
+    #   儿子 - 父亲 + 母亲 ≈ 女儿
+    # 初版写成 父亲 - 儿子 + 母亲，方向反了（变成"辈分升 → 降"再"性别替换"），
+    # 因此返回「父母亲」并不能作为"模型性别方向不稳定"的证据。
+    # 同理「太阳-白天+月亮」应写成 白天 - 太阳 + 月亮。
+    # 这里把每个类比的"关系类型"与"方向"显式标注出来，避免再次误读。
     analogies = [
-        ("国王", "男人", "女人", "王后"),   # 作业要求示例：国王-男人+女人≈王后
-        ("北京", "中国", "法国", "巴黎"),
-        ("中国", "北京", "伦敦", "英国"),
-        ("父亲", "儿子", "母亲", "女儿"),
-        ("医生", "医院", "学校", "老师"),
-        ("太阳", "白天", "月亮", "夜晚"),
+        ("国王", "男人", "女人", "王后", "性别：男→女"),
+        ("北京", "中国", "法国", "巴黎", "首都：国家→首都"),
+        ("中国", "北京", "伦敦", "英国", "国家：首都→国家"),
+        ("儿子", "父亲", "母亲", "女儿", "辈分+性别：男→女 同辈分"),
+        ("医生", "医院", "学校", "老师", "场所↔角色"),
+        ("白天", "太阳", "月亮", "夜晚", "时段：日→夜"),
     ]
-    for a, b, c, expect in analogies:
+    analogy_rows = []
+    for a, b, c, expect, rel in analogies:
         try:
             # a - b + c ≈ expect  =>  positive=[a, c], negative=[b]
             r = wv.most_similar(positive=[a, c], negative=[b], topn=5)
             got = r[0][0]
             top = "、".join(f"{w}({s:.3f})" for w, s in r[:3])
             ok = "★命中" if got == expect else ""
-            print(f"  {a}-{b}+{c} 期望≈{expect:4s} | 实际: {top} {ok}")
-            lines.append(f"  {a}-{b}+{c} 期望≈{expect} | 实际: {top} {ok}")
+            analogy_rows.append((a, b, c, expect, rel, top, bool(ok)))
+            print(f"  {a}-{b}+{c} 期望≈{expect:4s} [{rel}] | 实际: {top} {ok}")
+            lines.append(f"  {a}-{b}+{c} 期望≈{expect} [{rel}] | 实际: {top} {ok}")
         except Exception as e:
             print(f"  {a}-{b}+{c}: 词不在词表 {e}")
+            lines.append(f"  {a}-{b}+{c}: 词不在词表 ({type(e).__name__})")
 
     # ---------- 2) 词对相似度（至少 10 组） ----------
     print("\n=== 词对相似度（12 组）===")
@@ -138,9 +163,11 @@ def main():
         ("老师", "学生"), ("手机", "电脑"), ("程序员", "编程"), ("冠军", "奥运"),
     ]
     sim_lines = []
+    pair_rows = []
     for w1, w2 in pairs:
         if w1 in wv and w2 in wv:
             s = wv.similarity(w1, w2)
+            pair_rows.append((w1, w2, float(s)))
             print(f"  sim({w1}, {w2}) = {s:.4f}")
             sim_lines.append(f"  sim({w1}, {w2}) = {s:.4f}")
         else:
@@ -155,12 +182,13 @@ def main():
     labels = {"sports": "体育", "tech": "科技", "ent": "娱乐"}
     vecs, meta = [], []
     cover_hit, cover_tot = 0, 0
+    cat_coverage = {}
     for cat in categories:
         docs = load_docs(cat)
         n_doc = 0
         ch, ct = 0, 0
         for title, words in docs:
-            v, hit, tot = doc_vector(words, wv)
+            v, hit, tot = doc_vector(words, wv, normalize=NORMALIZE_DOCVEC)
             ch += hit
             ct += tot
             if v is None:
@@ -170,6 +198,7 @@ def main():
             n_doc += 1
         cover_hit += ch
         cover_tot += ct
+        cat_coverage[cat] = {"hit": ch, "total": ct, "ratio": (ch / ct if ct else 0.0)}
         print(f"  {labels[cat]}: {n_doc} 篇文档向量 OK；词表覆盖率 {ch/max(ct,1):.2%} ({ch}/{ct})")
         lines.append(f"  {labels[cat]}: {n_doc} 篇文档向量 OK；词表覆盖率 {ch/max(ct,1):.4%} ({ch}/{ct})")
     X = np.array(vecs)
@@ -217,11 +246,16 @@ def main():
 
     print("\n=== KMeans 文本聚类（K=3）===")
     print(f"  聚类纯度 Purity = {purity:.4f}   调整兰德指数 ARI = {ari:.4f}")
+    print(f"  距离口径：文档向量 L2 归一化={NORMALIZE_DOCVEC}，"
+          f"KMeans 使用欧氏距离；归一化后与余弦相似度排序等价")
     print("  混淆矩阵(行=真实:体育/科技/娱乐, 列=聚类簇):")
     for r, name in enumerate(["体育", "科技", "娱乐"]):
         print(f"    {name}: {conf[r].tolist()}")
     lines.append("\n=== KMeans 文本聚类（K=3）===")
     lines.append(f"  聚类纯度 Purity = {purity:.4f}   调整兰德指数 ARI = {ari:.4f}")
+    lines.append(f"  距离口径: 文档向量 L2 归一化={NORMALIZE_DOCVEC}; KMeans 默认欧氏距离")
+    lines.append("  说明: 归一化后 ||a-b||^2 = 2-2cos(a,b)，故欧氏聚类与余弦口径一致；")
+    lines.append("        若不归一化，则聚类受文档向量模长（≈词向量平均长度）影响，两种口径不可混用。")
     lines.append("  混淆矩阵(行=真实:体育/科技/娱乐, 列=聚类簇):")
     for r, name in enumerate(["体育", "科技", "娱乐"]):
         lines.append(f"    {name}: {conf[r].tolist()}")
@@ -270,6 +304,63 @@ def main():
     with open(os.path.join(OUT, "exp2_wordvec_results.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
         f.write("\n\n已保存图: exp2_wordvec_pca_tsne.png")
+
+    # ---- 消融对照：文档向量不归一化时的聚类指标（审计意见 M5）----
+    # 归一化前后用同一套数据、同一 KMeans 设置重跑，两个指标都实测出来，
+    # 使报告中的"归一化前/后"对照同样来自脚本计算，而不是手写常量。
+    _docs_flat = [(t, ws) for cat in categories for t, ws in load_docs(cat)]
+    _raw_vecs = []
+    for _t, _ws in _docs_flat:
+        _vr, _h, _tt = doc_vector(_ws, wv, normalize=False)
+        if _vr is not None:
+            _raw_vecs.append(_vr)
+    X_raw = np.array(_raw_vecs)
+    km_raw = KMeans(n_clusters=3, n_init=10, random_state=42).fit(X_raw)
+    _pur_raw = 0.0
+    for _c in range(3):
+        _ic = km_raw.labels_ == _c
+        if _ic.sum() == 0:
+            continue
+        _pur_raw += np.bincount(y_true[_ic], minlength=3).max()
+    _pur_raw /= len(y_true)
+    _ari_raw = adjusted_rand_score(y_true, km_raw.labels_)
+    print(f"  消融对照（文档向量不归一化）: Purity={_pur_raw:.4f}  ARI={_ari_raw:.4f}")
+    lines.append(f"  消融对照（文档向量不归一化）: Purity={_pur_raw:.4f}  ARI={_ari_raw:.4f}")
+
+    # ---- 结构化汇总（供报告生成器读取，杜绝报告里硬编码数字）----
+    # 混淆矩阵的行=真实主题，列=簇编号；这里额外记录「每个簇的多数真实主题」，
+    # 使报告能用客观映射描述"哪个簇对应哪个主题"，而不是靠人工误读列号。
+    cluster_majority = {}
+    for c in range(3):
+        idx = y_pred == c
+        if idx.sum() == 0:
+            continue
+        cnt = np.bincount(y_true[idx], minlength=3)
+        cluster_majority[str(c)] = {
+            "majority_cat": ["sports", "tech", "ent"][int(cnt.argmax())],
+            "majority_name": ["体育", "科技", "娱乐"][int(cnt.argmax())],
+            "n": int(idx.sum()), "counts": cnt.tolist()}
+    summary = {
+        "model": {"n_words": int(len(wv)), "dim": int(wv.vector_size),
+                  "path": os.path.relpath(MODEL, BASE)},
+        "normalize_docvec": bool(NORMALIZE_DOCVEC),
+        "cluster_distance": "euclidean (KMeans default)",
+        "analogies": [{"a": a, "b": b, "c": c, "expect": e, "relation": rel,
+                       "top": top, "hit": bool(hit)} for a, b, c, e, rel, top, hit in analogy_rows],
+        "word_pairs": [{"w1": w1, "w2": w2, "sim": s} for w1, w2, s in pair_rows],
+        "doc_vectors_shape": list(X.shape),
+        "vocab_coverage": {"overall": vocab_cover, "hit": cover_hit, "total": cover_tot,
+                           "per_cat": cat_coverage},
+        "intra_mean": float(np.mean(intra)), "inter_mean": float(np.mean(inter)),
+        "purity": float(purity), "ari": float(ari),
+        "purity_no_norm": float(_pur_raw), "ari_no_norm": float(_ari_raw),
+        "confusion": conf.tolist(),
+        "cluster_majority": cluster_majority,
+        "n_docs": int(len(y_true)),
+    }
+    with open(os.path.join(OUT, "results_summary_wordvec.json"), "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=1)
+    print("已落盘: out/results_summary_wordvec.json")
 
 
 if __name__ == "__main__":
