@@ -1,0 +1,9 @@
+title=企业蒙受巨额损失，CrowdStrike 向受灾客户发放 10 美元礼品卡
+source=https://www.163.com/dy/article/J7U6TVB60511B8LM.html
+category=tech
+
+IT之家 7 月 25 日消息，由于 CrowdStrike 安全更新故障，上周五全球范围内有 850 多万台使用微软 Windows 系统的电脑出现蓝屏故障，导致全球互联网服务大范围中断，波及各行各业。
+@64Uni_Lions 表示，他刚刚收到 CrowdStrike 首席商务官丹尼尔・伯纳德 (Daniel Bernard) 发送的致歉函，其中还附带了一份价值高达10 美元（IT之家备注：当前约 73 元人民币）的Uber Eats（送餐服务）礼品卡。
+最有趣的是，当用户去兑换时才发现这份礼品卡“已失效”，Uber Eats 页面提示称礼品卡“已被发行方取消，不再有效”，而 CrowdStrike 发言人 Kevin Benacci 向 TechCrunch 证实该公司确实发送了这份礼品卡，至于为何撤销却并未给出任何理由。
+如图所示，CrowdStrike 已经很清楚地认识到“7 月 19 日的事件所带来的额外工作”，“为此我们衷心感谢各位的理解并对由此造成的不便表示歉意”，“为了表达我们的感激，您的下一杯咖啡或夜宵将由我们买单！”
+▲ 图源：TechCrunch

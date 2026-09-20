@@ -1,0 +1,22 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ---- 大型模型文件（不随仓库分发，获取方式见 README）----
+model/
+
+# ---- 打包产物 / 临时文件 ----
+*.zip
+*.tar.gz
+*.7z
+~$*
+
+# ---- 编辑器 / 系统 ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
