@@ -62,6 +62,7 @@ def caption(doc, text, before=2, after=8):
 
 
 def add_image(doc, path, cap=None, max_w=6.1, max_h=6.6):
+    """插入图片；cap 为 None 时**仍然输出图题**（用文件名兜底），避免出现“无题图”。"""
     if not os.path.exists(path):
         para(doc, f"[缺失图片: {os.path.basename(path)}]", size=9)
         return
@@ -75,8 +76,7 @@ def add_image(doc, path, cap=None, max_w=6.1, max_h=6.6):
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p.paragraph_format.space_after = Pt(2)
     p.add_run().add_picture(path, width=Inches(inch_w))
-    if cap:
-        caption(doc, cap)
+    caption(doc, cap or f"图 {os.path.basename(path)}")
 
 
 def add_table(doc, headers, rows, cap=None, widths=None, size=9):
@@ -321,7 +321,7 @@ def build():
               [[w, fq, wx, ok] for w, fq, wx, ok in words],
               cap="表 3-3 词频最高的 20 个词及其平均 TF-IDF 权重", widths=[1.2, 1.0, 1.8, 1.2])
     add_image(doc, os.path.join(FIG, "exp1_tfidf_top20.png"),
-              "图 3-2 词频最高的 20 个词的 TF-IDF 权重柱状图")
+              "图 3-4 词频最高的 20 个词的 TF-IDF 权重柱状图")
 
     h(doc, "3.1.5 结果分析", 3)
     for s in [
@@ -343,7 +343,7 @@ def build():
         "但人名经分词后被停用词表与纯数字规则过滤，剩余词完全一致，于是向量相同、相似度为 1。"
         "同理“[小炮APP]专家齐大力竞彩推荐：日职+德甲2串1”与“…意甲西甲2串1”也判为 1.0。"
         "这正是词袋模型“只看词共现、不看词序与关键实体”的固有天花板。",
-        "词频与 TF-IDF 权重并非正相关（表 3-3、图 3-2）：高频词“预测（121 次）”“奖号（119 次）”"
+        "词频与 TF-IDF 权重并非正相关（表 3-3、图 3-4）：高频词“预测（121 次）”“奖号（119 次）”"
         "的平均权重只有 0.2763/0.2749，因为它们在大量文档中共同出现、IDF 很低；"
         "而“电影”词频仅 40 次，平均权重却最高（0.4560），“人（0.4237）”“特朗普（0.4123）”"
         "“俄（0.4067）”同理——它们集中于少数文档，区分度强。这与 TF-IDF 的设计初衷完全吻合。",
@@ -396,16 +396,16 @@ def build():
 
     h(doc, "3.2.4 关键代码解读", 3)
     add_image(doc, os.path.join(SHOT, "exp1_minhash_update.png"),
-              "图 3-4 MinHash 签名生成（k=128，exp1_minhash.py）")
+              "图 3-5 MinHash 签名生成（k=128，exp1_minhash.py）")
     para(doc, "代码要点：签名初始化为一维 k 长数组（初值 P）；对集合中每个 shingle 计算其 64 位整数哈希后，"
               "逐个哈希函数取最小值。实现上刻意使用纯 Python 大整数运算而非 numpy 向量化："
               "因为 a_i·x 的量级接近 2¹²²，超出 numpy int64 的范围会造成溢出，属于典型的“数学正确但工程踩坑”问题。")
     add_image(doc, os.path.join(SHOT, "exp1_lsh.png"),
-              "图 3-5 LSH 分桶与候选对生成（build_lsh_tables / lsh_candidates）")
+              "图 3-6 LSH 分桶与候选对生成（build_lsh_tables / lsh_candidates）")
     para(doc, "代码要点：把签名按 band 切片并作为 dict 的 key 建立倒排桶；同一桶内文档两两组合即为候选对，"
               "用 set 去重。整个过程只需一次线性扫描，避免了全量两两比较。")
     add_image(doc, os.path.join(SHOT, "exp1_minhash_prf.png"),
-              "图 3-6 P/R/F1 计算（prf）——分母为空时返回 0 并同时输出 TP/FP/FN")
+              "图 3-7 P/R/F1 计算（prf）——分母为空时返回 0 并同时输出 TP/FP/FN")
     para(doc, "代码要点：早期实现把“没有预测”时的查准率定义为 1.0，于是出现“一对都没检出却 F1 = 1.000”"
               "的荒谬结论。修正为分母为空时取 0，并让函数同时返回 TP/FP/FN，"
               "使“无预测”与“全对”在结果里不可能再被混淆。")
@@ -441,10 +441,9 @@ def build():
               cap="表 3-10 批量规模对运行时间的影响（真实标题语料，单位毫秒）",
               widths=[0.8, 1.15, 1.3, 1.35, 0.95, 1.25, 0.9], size=8)
     add_image(doc, os.path.join(FIG, "exp1_minhash_sim.png"),
-              "图 3-7 MinHash 估计 vs 精确 Jaccard（左）与两种金标准口径下的 F1（右）")
+              "图 3-8 MinHash 估计 vs 精确 Jaccard（左）与两种金标准口径下的 F1（右）")
     add_image(doc, os.path.join(FIG, "exp1_minhash_scaling.png"),
-              "图 3-8 批量规模对计算耗时的影响（对数纵轴）")
-
+              "图 3-9 批量规模对计算耗时的影响（对数纵轴）")
     h(doc, "3.2.6 结果分析", 3)
     for s in [
         "MinHash 估计精度：T1-T2（完全重复）估计值 1.0000 与精确值一致；"
@@ -470,7 +469,7 @@ def build():
         "把 5 对同事件改写全部漏掉；(b=64, r=2) 产生 6 对候选，覆盖全部 T1~T4 之间的相似对，"
         "但其中 3 对（T1-T4/T2-T4/T3-T4）经相似度回验后相似度 <0.2 被剔除。"
         "这恰好演示了工业界的三段式做法：**LSH 粗筛候选 → MinHash 相似度回验 → 阈值判定**。",
-        "运行时间与规模（表 3-10、图 3-8）：精确 Jaccard 随文档数呈平方增长（O(n²·|S|)），"
+        "运行时间与规模（表 3-10、图 3-9）：精确 Jaccard 随文档数呈平方增长（O(n²·|S|)），"
         "500 篇耗时约 134 ms；MinHash 全量对比虽把集合运算换成签名比较，但比较次数仍是 O(n²)，"
         "且 128 个哈希函数的签名生成本身开销不小，500 篇合计约 635 ms"
         "（其中签名生成约 12 ms/篇的量级，是纯 Python 大整数运算的代价）。"
