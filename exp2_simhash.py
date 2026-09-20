@@ -30,6 +30,7 @@
 """
 import os
 import re
+import math
 import json
 import hashlib
 import itertools
@@ -142,30 +143,41 @@ def group_pairs(docs, groups):
 
 # ------------------- 指纹构造：投票单位 × 权重来源 -------------------
 def make_fingerprints(terms_per_doc, tfidf_rows, feat_index,
-                      unit="unique", weight="tfidf", stop_scale=1.0):
+                      unit="unique", weight="tfidf", stop_scale=1.0,
+                      idf_rows=None):
     """
+    构造每篇文档的 SimHash 指纹。
+
     unit:   "token"  = 按词元出现逐次投票；"unique" = 每个唯一词只投一次
-    weight: "one"    = 等权 1；"tf" = 词频；"tfidf" = TF-IDF
+    weight: "one"    = 等权 1
+            "tf"     = 词频 m
+            "idf"    = 仅 IDF（用于把 IDF 的影响从 TF 中单独隔离出来）
+            "tfidf"  = TF-IDF（= sklearn 单元格值，含 TF 与 IDF）
     stop_scale: 命中停用词表时对权重乘的系数（1.0 表示不降权）
 
     把 term 小写后再查 feat_index，与 TfidfVectorizer(lowercase=True) 对齐。
+
+    【为什么要加 "idf"】审计指出：B1(权重=1) 与 B3(权重=m·IDF) 同时改变了 TF 与 IDF，
+    不能据此单独断言"IDF 有害"。要隔离 IDF，必须比较：
+        B2(唯一词, m)     vs  B3(唯一词, m·IDF)   ← 固定 TF，只变 IDF
+        B4(唯一词, IDF)   vs  B1(唯一词, 1)        ← 去掉 TF，只看 IDF
+    因此本函数支持只取 IDF（idf_rows 为预先算好的每篇文档 IDF 行向量）。
     """
     fps = []
     for di, ts in enumerate(terms_per_doc):
         cnt = Counter(ts)
-        if unit == "unique":
-            seq = list(cnt.keys())
-        else:
-            seq = ts
+        seq = list(cnt.keys()) if unit == "unique" else ts
         wl = []
         for t in seq:
+            key = t.lower()
             if weight == "one":
                 w = 1.0
             elif weight == "tf":
                 w = float(cnt[t])
+            elif weight == "idf":
+                w = float(idf_rows[di][feat_index[key]]) if key in feat_index else 0.0
             else:                                   # tfidf
-                w = float(tfidf_rows[di][feat_index[t.lower()]]) \
-                    if t.lower() in feat_index else 0.0
+                w = float(tfidf_rows[di][feat_index[key]]) if key in feat_index else 0.0
             if t in STOPWORDS:
                 w *= stop_scale
             wl.append(w)
@@ -173,9 +185,32 @@ def make_fingerprints(terms_per_doc, tfidf_rows, feat_index,
     return fps
 
 
-# 干净的 2×3 因子对照（单位 × 权重），外加停用词降权开关。
-# 之前的“等权 vs TF-IDF”之所以看起来 TF-IDF 更好，是因为等权基线本身被写坏了
-# （每词元投票 × 权重取该词总词频 ⇒ 总贡献 m²）。拆开之后结论完全反过来。
+def compute_idf_rows(terms_per_doc, feat_index):
+    """按 sklearn 默认平滑公式计算每个词的 IDF，用于"仅 IDF"的权重方案。
+
+        IDF(t) = ln((1+N)/(1+df(t))) + 1
+
+    注意：出现于全部 N 篇文档的词得到 IDF = ln(1)+1 = 1，**不是 0**。
+    （审计指出初版"停用词 IDF 接近 0"的解释不符合该公式，这里显式算出来备查。）
+    """
+    n_docs = len(terms_per_doc)
+    df = Counter()
+    for ts in terms_per_doc:
+        df.update(set(t.lower() for t in ts))
+    rows = []
+    for ts in terms_per_doc:
+        row = np.zeros(len(feat_index), dtype=np.float64)
+        for t in set(t.lower() for t in ts):
+            if t in feat_index:
+                row[feat_index[t]] = math.log((1 + n_docs) / (1 + df[t])) + 1.0
+        rows.append(row)
+    return np.vstack(rows), df
+
+
+# 干净的因子对照。
+# 关键等价关系（审计指出的代数关系，本脚本用 verify_equivalence.py 实测确认）：
+#     A1 每词元 × 等权(1)  ≡  B2 每唯一词 × TF
+# 因为出现 m 次的词在两种实现下的总投票贡献都是 m。
 SCHEME_GRID = [
     ("A1 每词元 · 等权(1)", dict(unit="token", weight="one")),
     ("A2 每词元 · TF", dict(unit="token", weight="tf")),
@@ -183,13 +218,18 @@ SCHEME_GRID = [
     ("B1 每唯一词 · 等权(1)", dict(unit="unique", weight="one")),
     ("B2 每唯一词 · TF", dict(unit="unique", weight="tf")),
     ("B3 每唯一词 · TF-IDF", dict(unit="unique", weight="tfidf")),
+    # ---- IDF 隔离对照（审计要求）----
+    ("B4 每唯一词 · 仅IDF", dict(unit="unique", weight="idf")),
+    ("B5 每唯一词 · IDF (每词元)", dict(unit="token", weight="idf")),
 ]
 SCHEMES = SCHEME_GRID + [
     ("B3s 每唯一词 · TF-IDF + 停用词降权", dict(unit="unique", weight="tfidf", stop_scale=STOP_SCALE)),
-    ("A3s 每词元 · TF-IDF + 停用词降权(初版方案)", dict(unit="token", weight="tfidf", stop_scale=STOP_SCALE)),
+    ("A3s 每词元 · TF-IDF + 停用词降权(旧权重策略)", dict(unit="token", weight="tfidf", stop_scale=STOP_SCALE)),
 ]
 RECOMMENDED = "B1 每唯一词 · 等权(1)"
-BASELINE_V1 = "A3s 每词元 · TF-IDF + 停用词降权(初版方案)"
+BASELINE_V1 = "A3s 每词元 · TF-IDF + 停用词降权(旧权重策略)"
+# 审计指出的等价类：这两行的指纹应当逐位相同
+EQUIVALENT_PAIR = ("A1 每词元 · 等权(1)", "B2 每唯一词 · TF")
 
 
 def main():
@@ -228,19 +268,54 @@ def main():
         print(f"  {g}: " + " ".join(f"{v:.4f}" for v in vals))
     near_vals = [jac(a, b) for a, b in gold_near]
     se_vals = [jac(a, b) for a, b in gold_same_event]
+    d3_vals = group_stats["D3"]["vals"]
     print(f"  改写簇 R1/R2 组内平均 {np.mean(near_vals):.4f} (min {min(near_vals):.4f})")
     print(f"  同事件簇 D1/D2 组内平均 {np.mean(se_vals):.4f} (max {max(se_vals):.4f})")
     separated = bool(min(near_vals) > max(se_vals))
-    print(f"  -> 两簇{'完全分离' if separated else '存在重叠'}；"
-          f"'近似重复'与'同事件不同报道'必须分层评估")
+    print(f"  -> 改写簇与同事件簇{'完全分离' if separated else '存在重叠'}")
+
+    # ---------- 金标准的四类清单（审计要求：不是正样本 ≠ 已确认是负样本）----------
+    #   POSITIVE  正样本       ：改写簇 R1/R2 组内对 —— 同源、字面几乎一致，应判重复
+    #   EXCLUDED  排除评估样本 ：D1/D2 同事件不同报道 —— 不计入本次 P/R/F1，
+    #                            因为"文本是否重复"与"是否报道同一事件"是两个不同任务
+    #   UNCERTAIN 不确定样本   ：D3 组 —— 内容层面已确认是**不同事件**（不同项目/运动员/奖牌），
+    #                            但其相似度量级与 D1/D2 重叠，说明靠分数自动分层在本数据上不可靠
+    #   NEGATIVE  负样本       ：跨组对
+    # 同时记录 gold_version 与 gold_sha256，避免报告与代码引用不同版本的真值
+    gold_spec = {
+        "version": "news20-gold-v2-three-tier",
+        "positive_groups": sorted(NEAR_DUP_GROUPS),
+        "excluded_groups": sorted(SAME_EVENT_GROUPS | UNRELATED_GROUPS),
+        "rule": ("POSITIVE=改写簇(R1/R2)组内对；EXCLUDED=同事件不同报道(D1/D2)+不同事件(D3)组内对；"
+                 "NEGATIVE=跨组对；UNCERTAIN=D3 的 3 对"),
+        "note_excluded": "被排除出正样本 ≠ 已确认是负样本；它们在同事件检索任务中仍然相关",
+    }
+    gold_spec["sha256"] = hashlib.sha256(
+        json.dumps(gold_spec, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+    overlap = not (max(d3_vals) < min(se_vals) or min(d3_vals) > max(se_vals))
+    print(f"  [重要] D3（已确认不同事件）组内 {min(d3_vals):.4f}~{max(d3_vals):.4f}，"
+          f"与 D1/D2 区间 {min(se_vals):.4f}~{max(se_vals):.4f} "
+          f"{'存在重叠' if overlap else '不重叠'}")
+    print("         => 仅凭相似度无法自动区分'同事件不同报道'与'不同事件'；"
+          "分层依据是内容事实（项目/运动员/奖牌不同），不是分数阈值。")
     print("  [D3 标注复核] 三条标题：")
     for d in docs:
         if d["group"] == "D3":
             print(f"    {d['idx']:02d}: {d['title']}")
     print("    -> 15 号为女子现代五项团体夺金，16/17 号为男子铁人三项摘银，属不同事件；")
-    print("       故 D3 不计入近似重复正样本（原始 manifest 保留不动，仅在评估时排除）。")
+    print("       原始 manifest 保留不动，仅在评估阶段排除。")
+    n_pairs_total_g = n * (n - 1) // 2
+    print(f"\n[金标准四类清单] version={gold_spec['version']}")
+    print(f"  POSITIVE  正样本    = 改写簇组内对，{len(gold_near)} 对 {gold_spec['positive_groups']}")
+    print(f"  EXCLUDED  排除评估  = 同事件/不同事件组内对，"
+          f"{len(gold_all_same_group) - len(gold_near)} 对 {gold_spec['excluded_groups']}")
+    print(f"  NEGATIVE  负样本    = 跨组对，{n_pairs_total_g - len(gold_all_same_group)} 对")
+    print(f"  UNCERTAIN 不确定    = D3 的 3 对（内容层面已判定为不同事件，但相似度量级与 D1/D2 重叠）")
+    print(f"  注意：EXCLUDED / UNCERTAIN ≠ NEGATIVE —— 它们只是不计入本次 P/R/F1")
+    print(f"  gold_sha256 = {gold_spec['sha256']}")
 
-    # ---------- 主实验：在「标题+正文」范围上跑 6 个方案 ----------
+    # ---------- 主实验：在「标题+正文」范围上跑全部方案 ----------
     scope = "标题+正文"
     tdoc = terms_by_scope[scope]
     vectorizer = TfidfVectorizer(ngram_range=(1, 1), token_pattern=r"(?u)\b\w+\b")
@@ -251,9 +326,24 @@ def main():
     print(f"\nTF-IDF 矩阵 {X.shape}；含大写字符的唯一词 {n_lower_mismatch} 个"
           f"（查询时统一 lower() 对齐特征名）")
 
+    # IDF 行向量：用于「仅 IDF」方案，把 IDF 的作用从 TF 中隔离出来
+    IDF_ROWS, DF = compute_idf_rows(tdoc, feat_index)
+    stop_idfs = [IDF_ROWS[di][feat_index[t.lower()]]
+                 for di in range(n) for t in set(tdoc[di])
+                 if t in STOPWORDS and t.lower() in feat_index]
+    nonstop_idfs = [IDF_ROWS[di][feat_index[t.lower()]]
+                    for di in range(n) for t in set(tdoc[di])
+                    if t not in STOPWORDS and t.lower() in feat_index]
+    print(f"[IDF 口径核对] 停用词 IDF 均值={np.mean(stop_idfs):.4f}"
+          f"（min {np.min(stop_idfs):.4f}, max {np.max(stop_idfs):.4f}），"
+          f"非停用词 IDF 均值={np.mean(nonstop_idfs):.4f}；"
+          f"全语料出现词的 IDF=ln(1)+1=1.0（**不是 0**）")
+
     res = {}
+    fps_by_scheme = {}
     for name, kw in SCHEMES:
-        fps = make_fingerprints(tdoc, X, feat_index, **kw)
+        fps = make_fingerprints(tdoc, X, feat_index, idf_rows=IDF_ROWS, **kw)
+        fps_by_scheme[name] = fps
         dist = np.zeros((n, n), dtype=int)
         for i, j in itertools.combinations(range(n), 2):
             dist[i, j] = dist[j, i] = hamming(fps[i], fps[j])
@@ -267,6 +357,38 @@ def main():
     for name, _ in SCHEMES:
         p, r, f1, tp, fp, fn = res[name]["strict"]
         print(f"{name:<34}{p:>8.3f}{r:>8.3f}{f1:>8.3f}{tp:>5}{fp:>5}{fn:>5}")
+
+    # ---------- 等价类自检（审计指出的代数关系）----------
+    print(f"\n=== 等价类自检：{EQUIVALENT_PAIR[0]}  ?=  {EQUIVALENT_PAIR[1]} ===")
+    fa, fb = fps_by_scheme[EQUIVALENT_PAIR[0]], fps_by_scheme[EQUIVALENT_PAIR[1]]
+    eq_same = [x == y for x, y in zip(fa, fb)]
+    eq_diff_docs = [i + 1 for i, s in enumerate(eq_same) if not s]
+    print(f"  逐篇指纹完全相同: {all(eq_same)}（{eq_same.count(True)}/{len(eq_same)} 篇；"
+          f"不同文档编号: {eq_diff_docs or '无'}）")
+    print("  说明：出现 m 次的词在两种实现下总投票贡献都是 m，故指纹应逐位相同；")
+    print("        这也意味着 A1/B2 在对照表中是同一个方案，重复列不应被当作独立证据。")
+
+    # ---------- 停用词降权是否真的有作用（审计要求：不能只看 P/R/F1）----------
+    print("\n=== 停用词降权的影响（不能只看 P/R/F1）===")
+    stop_effect = {}
+    for base, withstop in (("B3 每唯一词 · TF-IDF", "B3s 每唯一词 · TF-IDF + 停用词降权"),
+                           ("A3 每词元 · TF-IDF", "A3s 每词元 · TF-IDF + 停用词降权(旧权重策略)")):
+        f1_, f2_ = fps_by_scheme[base], fps_by_scheme[withstop]
+        n_fp_changed = sum(1 for x, y in zip(f1_, f2_) if x != y)
+        bits = [hamming(x, y) for x, y in zip(f1_, f2_)]
+        d1, d2 = res[base]["dist"], res[withstop]["dist"]
+        dmax = int(np.max(np.abs(d1 - d2))) if n > 1 else 0
+        dchanged = int(np.sum(np.triu(d1 != d2, 1))) if n > 1 else 0
+        sd = len(res[base]["pred"] ^ res[withstop]["pred"])
+        stop_effect[base] = dict(n_fp_changed=n_fp_changed, max_bit_flip=int(max(bits)),
+                                 mean_bit_flip=float(np.mean(bits)), max_dist_delta=dmax,
+                                 n_dist_changed=dchanged, pred_symdiff=sd,
+                                 same_prf=res[base]["strict"] == res[withstop]["strict"])
+        print(f"  {base}  →  {withstop}")
+        print(f"    指纹改变的文档数: {n_fp_changed}/{n}；最大翻转位数: {max(bits)}；"
+              f"平均翻转位数: {np.mean(bits):.2f}")
+        print(f"    距离矩阵改变的文本对数: {dchanged}（最大距离变化 {dmax}）")
+        print(f"    预测集合对称差: {sd} 对；P/R/F1 是否完全相同: {stop_effect[base]['same_prf']}")
 
     # ---------- 文本范围对照（用推荐方案） ----------
     scope_rows = []
@@ -435,15 +557,60 @@ def main():
         "ham_th": HAM_TH,
         "stop_scale": STOP_SCALE,
         "n_pairs_total": n * (n - 1) // 2,
-        "gold": {"near_dup": len(gold_near), "same_event": len(gold_same_event),
-                 "mixed_all_same_group": len(gold_all_same_group),
-                 "near_dup_groups": sorted(NEAR_DUP_GROUPS),
-                 "same_event_groups": sorted(SAME_EVENT_GROUPS),
-                 "unrelated_groups": sorted(UNRELATED_GROUPS)},
+        # 金标准：版本号 + 校验值 + 四类清单（审计要求）
+        "gold_spec": gold_spec,
+        "gold": {
+            "version": gold_spec["version"],
+            "sha256": gold_spec["sha256"],
+            "near_dup": len(gold_near),
+            "same_event": len(gold_same_event),
+            "excluded_eval": len(gold_all_same_group) - len(gold_near),
+            "negative_cross_group": n * (n - 1) // 2 - len(gold_all_same_group),
+            "uncertain": len(d3_vals),
+            "mixed_all_same_group": len(gold_all_same_group),
+            "near_dup_groups": sorted(NEAR_DUP_GROUPS),
+            "same_event_groups": sorted(SAME_EVENT_GROUPS),
+            "unrelated_groups": sorted(UNRELATED_GROUPS),
+            "categories": {
+                "POSITIVE": {"n": len(gold_near), "groups": sorted(NEAR_DUP_GROUPS),
+                             "meaning": "改写簇组内对：同源、字面几乎一致，应判重复"},
+                "EXCLUDED": {"n": len(gold_all_same_group) - len(gold_near),
+                             "groups": sorted(SAME_EVENT_GROUPS),
+                             "meaning": "同事件不同报道：不计入本次 P/R/F1；"
+                                        "被排除出正样本 ≠ 已确认是负样本"},
+                "UNCERTAIN": {"n": len(d3_vals), "groups": sorted(UNRELATED_GROUPS - {"U1", "U2", "U3"}),
+                              "meaning": "D3：内容层面已确认是不同事件，但相似度量级与 D1/D2 重叠"},
+                "NEGATIVE": {"n": n * (n - 1) // 2 - len(gold_all_same_group),
+                             "meaning": "跨组对"},
+            },
+        },
         "group_stats": group_stats,
         "separated": separated,
+        # D3（已确认不同事件）与 D1/D2（同事件）的相似度区间是否重叠 —— 若重叠，
+        # 说明不能靠分数阈值自动分层，必须依赖内容事实
+        "d3_overlaps_same_event": bool(overlap),
+        "d3_range": [float(min(d3_vals)), float(max(d3_vals))],
+        "same_event_range": [float(min(se_vals)), float(max(se_vals))],
         "scope": scope,
         "n_lower_mismatch_tokens": n_lower_mismatch,
+        # IDF 口径：显式记录实测 IDF，纠正"停用词 IDF 接近 0"的错误说法
+        "idf_stats": {"stopword_mean": float(np.mean(stop_idfs)),
+                      "stopword_min": float(np.min(stop_idfs)),
+                      "stopword_max": float(np.max(stop_idfs)),
+                      "nonstop_mean": float(np.mean(nonstop_idfs)),
+                      "all_docs_idf_value": 1.0,
+                      "formula": "ln((1+N)/(1+df))+1（sklearn 默认平滑）"},
+        # 代数等价类：A1 ≡ B2，两者指纹应逐位相同
+        "equivalence": {
+            "pair": list(EQUIVALENT_PAIR),
+            "fingerprints_identical": bool(all(eq_same)),
+            "n_docs_identical": int(eq_same.count(True)),
+            "n_docs_total": int(len(eq_same)),
+            "note": "出现 m 次的词在两种实现下总投票贡献都是 m，故 A1/B2 是同一方案，"
+                    "重复列不应被当作独立证据",
+        },
+        # 停用词降权：不能只看 P/R/F1，需给出指纹与预测集合层面的差异
+        "stopword_downweight_effect": stop_effect,
         "schemes": [{"name": nm, "config": kw,
                      "strict": dict(zip(["P", "R", "F1", "TP", "FP", "FN"], res[nm]["strict"])),
                      "mixed": dict(zip(["P", "R", "F1", "TP", "FP", "FN"], res[nm]["mixed"])),
@@ -458,6 +625,10 @@ def main():
         "sweep_f1": {nm: [round(sweep[nm][k][1][2], 6) for k in range(11)] for nm, _ in SCHEMES},
         "recommended": RECOMMENDED,
         "baseline_v1": BASELINE_V1,
+        "baseline_v1_note": ("保留的是**旧权重策略**（每词元×TF-IDF+停用词降权）；"
+                             "其数据解析、hash 规则与 gold 均已更新，"
+                             "因此它是'旧权重策略在新数据与新 gold 下的重跑'，"
+                             "不能与初版 F1 直接相减当作'仅改权重'的提升"),
     }
     with open(os.path.join(OUT, "results_summary_simhash.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=1)

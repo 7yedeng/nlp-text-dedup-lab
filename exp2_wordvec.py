@@ -9,6 +9,7 @@
 """
 import os
 import re
+import hashlib
 import json
 import time
 import numpy as np
@@ -37,6 +38,21 @@ STOPWORDS = set("""的 了 和 是 就 都 而 及 与 着 或 一个 没有 我
 # 文档向量是否做 L2 归一化（见 doc_vector 的 M5 说明）。
 # 归一化后 KMeans 的欧氏距离与余弦相似度排序等价，口径统一。
 NORMALIZE_DOCVEC = True
+
+# 模型身份：加载时计算完整 SHA-256 并记录字节数，
+# 使"用了哪个模型"可被独立核验（审计 M3/§5 要求完整哈希，不接受省略形式）。
+MODEL_SHA256 = None      # 由 main() 在加载后填充
+
+
+def _sha256_of(path, chunk=1 << 20):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            b = f.read(chunk)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
 
 
 def parse_doc(raw):
@@ -117,6 +133,10 @@ def main():
     print("加载预训练词向量（腾讯 AI Lab 中文词向量 800万词轻量版，200 维）...")
     wv = KeyedVectors.load_word2vec_format(MODEL, binary=True, encoding="utf-8")
     print(f"加载完成: {len(wv)} 词, 维度 {wv.vector_size}, 耗时 {time.time()-t0:.2f}s")
+    global MODEL_SHA256, MODEL_SIZE
+    MODEL_SIZE = os.path.getsize(MODEL)
+    MODEL_SHA256 = _sha256_of(MODEL)
+    print(f"模型身份: size={MODEL_SIZE} bytes  sha256={MODEL_SHA256}")
 
     lines = [f"模型信息: {len(wv)} 词 x {wv.vector_size} 维 (腾讯 AI Lab 中文词向量 800万词轻量版)"]
 
@@ -342,7 +362,11 @@ def main():
             "n": int(idx.sum()), "counts": cnt.tolist()}
     summary = {
         "model": {"n_words": int(len(wv)), "dim": int(wv.vector_size),
-                  "path": os.path.relpath(MODEL, BASE)},
+                  "path": os.path.relpath(MODEL, BASE),
+                  # 模型身份锁定（审计要求：完整 SHA-256 + 字节数 + 头部 + 加载方式）
+                  "sha256": MODEL_SHA256, "size_bytes": MODEL_SIZE,
+                  "header": f"{len(wv)} {wv.vector_size}",
+                  "loader": "gensim.models.KeyedVectors.load_word2vec_format(binary=True)"},
         "normalize_docvec": bool(NORMALIZE_DOCVEC),
         "cluster_distance": "euclidean (KMeans default)",
         "analogies": [{"a": a, "b": b, "c": c, "expect": e, "relation": rel,

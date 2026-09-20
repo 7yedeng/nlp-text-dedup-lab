@@ -2,7 +2,11 @@
  "model": {
   "n_words": 143613,
   "dim": 200,
-  "path": "model\\light_Tencent_AILab_ChineseEmbedding.bin"
+  "path": "model\\light_Tencent_AILab_ChineseEmbedding.bin",
+  "sha256": "5515923c7e67cdc7eb42996546e0bad273c8452f3bfad6db0794e51c848d151b",
+  "size_bytes": 116021049,
+  "header": "143613 200",
+  "loader": "gensim.models.KeyedVectors.load_word2vec_format(binary=True)"
  },
  "normalize_docvec": true,
  "cluster_distance": "euclidean (KMeans default)",

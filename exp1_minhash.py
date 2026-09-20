@@ -435,6 +435,14 @@ def main():
         times.append(dict(n=m, shingle_ms=t_shingle * 1000,
                           exact=te, exact_std=se, minhash=tm, minhash_std=sm,
                           lsh_16_8=tl1, lsh_16_8_std=s1, lsh_64_2=tl2, lsh_64_2_std=s2_,
+                          # 原始逐次值（审计要求：只有 5 次时应公开每次原始值，而不只给中位数）
+                          raw_exact_s=[float(x) for x in te_l],
+                          raw_minhash_s=[float(x) for x in tm_l],
+                          raw_lsh_16_8_s=[float(x) for x in tl1_l],
+                          raw_lsh_64_2_s=[float(x) for x in tl2_l],
+                          stat_note=("主报值 = 5 次重复的中位数；std = 总体标准差(np.std, ddof=0)；"
+                                     "raw_*_s = 逐次原始秒数；计时期间 GC 关闭；"
+                                     "shingle 构建为三条路径的公共成本，单独列出、不计入比较阶段"),
                           total_pairs=total_pairs, cand_16_8=c1, cand_64_2=c2,
                           prune_16_8=prune, speedup_lsh64_vs_exact=float(speedup_exact)))
         print(f"  文档数={m:4d} (shingle {t_shingle*1000:7.2f}ms): "
