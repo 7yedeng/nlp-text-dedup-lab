@@ -20,3 +20,9 @@ model/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# ---- 审计过程产物（本地核对用，不入库）----
+# 修订前的原始落盘结果与完整运行日志，仅用于本地逐行 diff；
+# 结论已整理进 out/AUDIT_NOTES.md，需要时可用 README 中的命令重新生成。
+out/_baseline_original/
+out/_repro_logs/

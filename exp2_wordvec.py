@@ -35,6 +35,33 @@ os.makedirs(FIG, exist_ok=True)
 STOPWORDS = set("""的 了 和 是 就 都 而 及 与 着 或 一个 没有 我们 你们 他们 它们 这 那 之 在 上 下 中 有 我 你 他 她 它 也 还 又 被 让 把 对 从 向 为 以 于 到 出 过 很 更 最 不 没 谁 什么 怎么 为什么 如何 哪 哪些 因为 所以 但是 然而 虽然 如果 只要 已经 正在 将 会 能 可以 应该 必须 这个 那个 这些 那些 啊 吧 呢 嘛 啦 呀 吗 哈 好 哦 嗯 一 二 三 四 五 六 七 八 九 十 万 亿 百 千 个 条 篇 岁 年 月 日 时 分 秒 今天 昨天 明天 现在 时候 方面 进行 通过 随着 据悉 记者 报道 消息 表示 称 目前 日前 近日 已经 香港 台湾 中国 美国 日本 """.split())
 
 
+def parse_doc(raw):
+    """解析统一的新闻文件格式，返回 (title, source, category, body)。
+
+    文件格式：
+        title=标题
+        source=来源|URL
+        category=类别
+        [group=分组]        ← 仅 news20 才有
+        [rewrite=改写类型]   ← 仅 news20 才有
+        <空行>
+        正文……
+
+    【修正D】初版用 `raw.split("\\n", 3)[3]` 取正文，由于前 3 次切分只吃掉
+    3 个换行符，且 metadata 与正文之间还有一个空行，第 4 段实际是
+    “剩余元信息 + 空行 + 正文”（例如 "group=R1\\nrewrite=\\n\\n\\n智东西…"）。
+    这会把 group=/rewrite= 当作正文词混入文档，虚增词表覆盖率。
+    现改为按首个空行切分，严格取正文。
+    """
+    head, _, body = raw.partition("\n\n")
+    meta = {}
+    for ln in head.split("\n"):
+        if "=" in ln:
+            k, _, v = ln.partition("=")
+            meta[k.strip()] = v.strip()
+    return meta.get("title", ""), meta.get("source", ""), meta.get("category", ""), body.strip()
+
+
 def load_docs(category):
     """读取 data/<category>/*.txt，返回 [(title, body tokens)]"""
     folder = os.path.join(DATA, category)
@@ -43,9 +70,7 @@ def load_docs(category):
         if not fn.endswith(".txt"):
             continue
         with open(os.path.join(folder, fn), encoding="utf-8") as f:
-            lines = f.read().split("\n", 3)
-        title = lines[0].replace("title=", "", 1).strip()
-        body = lines[3] if len(lines) > 3 else ""
+            title, _src, _cat, body = parse_doc(f.read())
         text = title + " " + body
         words = []
         for w in jieba.lcut(text):
@@ -60,14 +85,17 @@ def load_docs(category):
 
 
 def doc_vector(words, wv):
-    """词向量平均池化（Doc2Vec 平均）：只累加词表中存在的词向量"""
+    """词向量平均池化（Doc2Vec 平均）：只累加词表中存在的词向量。
+
+    返回 (向量, 命中词数, 总词数)；向量为 None 表示全部词都在词表外。
+    """
     vecs = []
     for w in words:
         if w in wv:
             vecs.append(wv[w])
     if not vecs:
-        return None
-    return np.mean(vecs, axis=0)
+        return None, 0, len(words)
+    return np.mean(vecs, axis=0), len(vecs), len(words)
 
 
 def main():
@@ -126,21 +154,29 @@ def main():
     categories = ["sports", "tech", "ent"]
     labels = {"sports": "体育", "tech": "科技", "ent": "娱乐"}
     vecs, meta = [], []
+    cover_hit, cover_tot = 0, 0
     for cat in categories:
         docs = load_docs(cat)
         n_doc = 0
+        ch, ct = 0, 0
         for title, words in docs:
-            v = doc_vector(words, wv)
+            v, hit, tot = doc_vector(words, wv)
+            ch += hit
+            ct += tot
             if v is None:
                 continue
             vecs.append(v)
             meta.append((cat, title))
             n_doc += 1
-        print(f"  {labels[cat]}: {n_doc} 篇文档向量 OK")
-        lines.append(f"  {labels[cat]}: {n_doc} 篇文档向量 OK")
+        cover_hit += ch
+        cover_tot += ct
+        print(f"  {labels[cat]}: {n_doc} 篇文档向量 OK；词表覆盖率 {ch/max(ct,1):.2%} ({ch}/{ct})")
+        lines.append(f"  {labels[cat]}: {n_doc} 篇文档向量 OK；词表覆盖率 {ch/max(ct,1):.4%} ({ch}/{ct})")
     X = np.array(vecs)
-    print(f"文档向量矩阵: {X.shape}")
+    vocab_cover = cover_hit / max(cover_tot, 1)
+    print(f"文档向量矩阵: {X.shape}；整体词表覆盖率 {vocab_cover:.2%}")
     lines.append(f"文档向量矩阵: {X.shape}")
+    lines.append(f"整体词表覆盖率: {vocab_cover:.4%} ({cover_hit}/{cover_tot})")
 
     # 类内 / 类间平均余弦相似度（检验主题可分性）
     from sklearn.metrics.pairwise import cosine_similarity

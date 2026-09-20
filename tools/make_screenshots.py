@@ -64,36 +64,61 @@ def models_and_functions():
         ("TF-IDF 特征构建与 Top-10 相似对（exp1_tfidf.py 关键段）",
          extract_section(inspect.getsource(exp1_tfidf.main), "# 2) TF-IDF 特征矩阵", "# 4) 词频统计"),
          "exp1_tfidf_core.png"),
+        ("TF-IDF 权重回查：大小写对齐与 OOV 标记（exp1_tfidf.py 关键段）",
+         extract_section(inspect.getsource(exp1_tfidf.main), "# 4) 词频统计", "# 5) 落盘"),
+         "exp1_tfidf_weight_lookup.png"),
+        ("语料规范化去重（exp1_tfidf.py normalize_title / dedup_titles）",
+         inspect.getsource(exp1_tfidf.normalize_title) + "\n" + inspect.getsource(exp1_tfidf.dedup_titles),
+         "exp1_tfidf_dedup.png"),
         ("MinHash 签名生成 k=128（exp1_minhash.py MinHash.update）",
          inspect.getsource(exp1_minhash.MinHash.update),
          "exp1_minhash_update.png"),
         ("LSH 分桶与候选生成（exp1_minhash.py build_lsh_tables / lsh_candidates）",
          inspect.getsource(exp1_minhash.build_lsh_tables) + "\n" + inspect.getsource(exp1_minhash.lsh_candidates),
          "exp1_lsh.png"),
+        ("分层金标准下的 P/R/F1 计算（exp1_minhash.py prf）",
+         inspect.getsource(exp1_minhash.prf),
+         "exp1_minhash_prf.png"),
         ("Word2Vec 加载与语义推理（exp2_wordvec.py main 关键段）",
          extract_section(inspect.getsource(exp2_wordvec.main), "wv = KeyedVectors", "=== 词对相似度"),
          "exp2_wordvec_load.png"),
         ("词向量平均池化生成文档向量（exp2_wordvec.py doc_vector）",
          inspect.getsource(exp2_wordvec.doc_vector),
          "exp2_docvector.png"),
+        ("新闻文件元信息解析：按空行严格切分（exp2_wordvec.py parse_doc）",
+         inspect.getsource(exp2_wordvec.parse_doc),
+         "exp2_parse_doc.png"),
         ("KMeans 文本聚类与纯度/ARI 评估（exp2_wordvec.py main 关键段）",
          extract_section(inspect.getsource(exp2_wordvec.main), "cats = [m[0] for m in meta]", "# ---------- 5) PCA / t-SNE"),
          "exp2_kmeans.png"),
         ("64 位加权 SimHash 指纹与海明距离（exp2_simhash.py）",
          inspect.getsource(exp2_simhash.simhash_fingerprint) + "\n\n" + inspect.getsource(exp2_simhash.hamming),
          "exp2_simhash_fp.png"),
-        ("TF-IDF 加权 SimHash 实验主体（exp2_simhash.py main 关键段）",
-         extract_section(inspect.getsource(exp2_simhash.main), "fp_w = []", "# ---------- Ground truth"),
+        ("TF-IDF 加权 SimHash 三种权重方案构造（exp2_simhash.py main 关键段）",
+         extract_section(inspect.getsource(exp2_simhash.main), "# ---------- 三种权重方案",
+                         "# ---------- 三层金标准"),
          "exp2_simhash_main.png"),
+        ("三层金标准与分组内相似度自检（exp2_simhash.py main 关键段）",
+         extract_section(inspect.getsource(exp2_simhash.main), "# ---------- 三层金标准",
+                         "# ---------- 阈值扫描"),
+         "exp2_simhash_gold.png"),
     ]
 
 
 def extract_section(src, start_marker, end_marker):
+    """按起止标记截取代码段。
+
+    标记缺失时**直接报错**而不是静默退化为“整份源码”——
+    初版 `next(..., 0)` 在标记改名后会悄悄截出整个 main 函数，
+    生成一张 6290 px 高的无效“代码截图”，属于典型的静默失败。
+    """
     lines = src.split("\n")
-    start = next((i for i, ln in enumerate(lines) if start_marker in ln), 0)
+    start = next((i for i, ln in enumerate(lines) if start_marker in ln), None)
+    if start is None:
+        raise ValueError(f"起始标记未找到: {start_marker!r}")
     end = next((i for i, ln in enumerate(lines[start + 1:], start + 1) if end_marker in ln), None)
     if end is None:
-        end = len(lines)
+        raise ValueError(f"结束标记未找到: {end_marker!r}")
     return "\n".join(lines[start:end])
 
 
