@@ -13,6 +13,7 @@ from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 from PIL import Image
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -35,7 +36,7 @@ MEMBERS = [
     ("成员二", os.environ.get("REPORT_MEMBER2_NAME", "").strip() or _PH,
      os.environ.get("REPORT_MEMBER2_ID", "").strip() or _PH),
 ]
-CLASS_NAME = os.environ.get("REPORT_CLASS", "").strip() or _PH
+CLASS_NAME = os.environ.get("REPORT_CLASS", "").strip() or "24级数据科学与大数据技术1班"
 EXP_DATE = os.environ.get("REPORT_DATE", "").strip() or "______年____月____日"
 # 署名是否已填全（用于决定输出文件名与是否生成脱敏版）
 HAS_REAL_NAMES = all(m[1] != _PH and m[2] != _PH for m in MEMBERS)
@@ -54,12 +55,75 @@ def set_run(run, size=10.5, bold=False, color=None, name=FONT):
     run._element.rPr.rFonts.set(qn("w:eastAsia"), name)
 
 
+# ---------------------------------------------------------------- 行内富文本
+# 【重要】报告里的说明文字大量使用 `**加粗**` 与 `` `代码` `` 这两种 Markdown 标记。
+# 早期版本直接把整串文本塞进一个 run，结果是 Word 里出现字面的星号和反引号。
+# 下面是一个**单遍扫描**的行内解析器，把它们渲染成真正的格式：
+#   **文字**  -> 加粗
+#   `文字`    -> 等宽字体 + 浅灰底纹（代码样式）
+# 两种标记可以任意嵌套/交替；未闭合的标记按普通文本输出，不丢字。
+#
+# 注意：必须单遍扫描。早期用“先按 ** 切分、再按反引号切分”的两遍做法，
+# 会在两种标记交替出现时丢失状态（实测把「某处**切分」之类文本切坏）。
+CODE_FONT = "Consolas"
+CODE_SHADE = "F2F2F2"
+
+
+def parse_inline(text):
+    """把文本解析为 [(片段, is_bold, is_code)]。未闭合标记按普通文本处理。"""
+    # 先统计每种标记出现次数：配对数为奇数时，最后一个标记不成对，
+    # 此时把它当普通字符，避免吞掉后面的正常文字。
+    n_bold = text.count("**")
+    n_tick = text.count("`")
+    allow_bold = (n_bold % 2 == 0)
+    allow_tick = (n_tick % 2 == 0)
+
+    out, buf = [], []
+    i, bold_on, code_on = 0, False, False
+    while i < len(text):
+        if allow_bold and text.startswith("**", i):
+            out.append(("".join(buf), bold_on, code_on))
+            buf = []
+            bold_on = not bold_on
+            i += 2
+            continue
+        if allow_tick and text[i] == "`":
+            out.append(("".join(buf), bold_on, code_on))
+            buf = []
+            code_on = not code_on
+            i += 1
+            continue
+        buf.append(text[i])
+        i += 1
+    out.append(("".join(buf), bold_on, code_on))
+    return [(s, b, c) for s, b, c in out if s != ""]
+
+
+def add_rich(p, text, size=10.5, bold=False, color=None, name=FONT):
+    """把含 `**`/反引号 标记的文本渲染到段落 p，返回生成的 run 列表。"""
+    runs = []
+    for seg, is_bold, is_code in parse_inline(str(text)):
+        r = p.add_run(seg)
+        if is_code:
+            set_run(r, size=size - 0.5, bold=(bold or is_bold),
+                    color=color, name=CODE_FONT)
+            # 浅灰底纹，便于区分代码/文件名
+            shd = OxmlElement("w:shd")
+            shd.set(qn("w:val"), "clear")
+            shd.set(qn("w:fill"), CODE_SHADE)
+            r._element.get_or_add_rPr().append(shd)
+        else:
+            set_run(r, size=size, bold=(bold or is_bold), color=color, name=name)
+        runs.append(r)
+    return runs
+
+
 def h(doc, text, level=1):
     sizes = {0: 20, 1: 15, 2: 13, 3: 11.5}
     p = doc.add_paragraph()
     p.paragraph_format.space_before = Pt(10 if level else 0)
     p.paragraph_format.space_after = Pt(6)
-    set_run(p.add_run(text), size=sizes.get(level, 11.5), bold=True)
+    add_rich(p, text, size=sizes.get(level, 11.5), bold=True)
     return p
 
 
@@ -71,7 +135,7 @@ def para(doc, text, size=10.5, bold=False, indent=True, align=None):
         p.paragraph_format.first_line_indent = Pt(21)
     if align:
         p.alignment = align
-    set_run(p.add_run(text), size=size, bold=bold)
+    add_rich(p, text, size=size, bold=bold)
     return p
 
 
@@ -80,7 +144,7 @@ def caption(doc, text, before=2, after=8):
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p.paragraph_format.space_before = Pt(before)
     p.paragraph_format.space_after = Pt(after)
-    set_run(p.add_run(text), size=9, bold=True, color=(0x44, 0x44, 0x44))
+    add_rich(p, text, size=9, bold=True, color=(0x44, 0x44, 0x44))
     return p
 
 
@@ -113,14 +177,15 @@ def add_table(doc, headers, rows, cap=None, widths=None, size=9):
         cell.text = ""
         p = cell.paragraphs[0]
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        set_run(p.add_run(str(hd)), size=size, bold=True)
+        add_rich(p, str(hd), size=size, bold=True)
     for r in rows:
         cells = t.add_row().cells
         for i, v in enumerate(r):
             cells[i].text = ""
             p = cells[i].paragraphs[0]
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER if i else WD_ALIGN_PARAGRAPH.LEFT
-            set_run(p.add_run(str(v)), size=size)
+            # 单元格内容同样支持 **加粗** 与 `代码` 标记
+            add_rich(p, str(v), size=size)
     if widths:
         for row in t.rows:
             for i, wd in enumerate(widths):
@@ -1512,13 +1577,27 @@ def build():
         prefix = "成员一+成员二"
     name = f"{prefix}+第1次实验报告.docx"
     path = os.path.join(OUT, name)
-    doc.save(path)
-    print("报告已生成:", path)
+
+    # 目标文件可能正被 Word/WPS 打开而无法写入。此时先生成到临时名，
+    # 再尝试原子替换；替换失败则保留临时文件并明确提示（不让构建整体失败）。
+    tmp_path = os.path.join(OUT, "_tmp_report.docx")
+    doc.save(tmp_path)
+    try:
+        os.replace(tmp_path, path)
+        print("报告已生成:", path)
+    except PermissionError:
+        alt = os.path.join(OUT, f"{prefix}+第1次实验报告-新.docx")
+        try:
+            os.replace(tmp_path, alt)
+        except OSError:
+            alt = tmp_path
+        print(f"[注意] 目标文件被占用（可能正在 Word/WPS 中打开），已改写到：\n        {alt}")
+        print("        关闭该文档后重跑本脚本即可覆盖原文件。")
 
     # 公开脱敏版：把署名替换为占位符，并清空文档元数据的作者字段。
+    # 直接在内存中的 doc 上操作（不重新读文件，避免目标文件被占用时失败）。
     # 替换表由 MEMBERS 推导，代码中不出现任何真实姓名/学号。
     try:
-        d2 = Document(path)
         SUBST = []
         for m in MEMBERS:
             if m[1] != _PH:
@@ -1535,21 +1614,21 @@ def build():
                         run.text = run.text.replace(a, b)
                         replaced += 1
 
-        for p in d2.paragraphs:
+        for p in doc.paragraphs:
             scrub_paragraph(p)
-        for t in d2.tables:
+        for t in doc.tables:
             for row in t.rows:
                 for cell in row.cells:
                     for p in cell.paragraphs:
                         scrub_paragraph(p)
         # 文档元数据：作者/最后修改者（python-docx 默认值是占位，仍统一清空）
-        cp = d2.core_properties
+        cp = doc.core_properties
         cp.author = ""
         cp.last_modified_by = ""
         cp.title = ""
         cp.comments = ""
         pub = os.path.join(OUT, "第1次实验报告-公开脱敏版.docx")
-        d2.save(pub)
+        doc.save(pub)
         print(f"公开脱敏版已生成: {pub}（替换 {replaced} 处署名，元数据作者已清空）")
     except Exception as e:                       # noqa: BLE001
         print(f"[warn] 公开脱敏版生成失败: {e}")
