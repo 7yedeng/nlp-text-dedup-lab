@@ -138,7 +138,67 @@ def load_summaries():
     return out
 
 
+def load_source_index():
+    """读取 data/ 下各语料文件的元信息，供报告「数据来源说明」一节直接引用。
+
+    只读 title=/source=/category=/group=/rewrite= 这几个字段，
+    正文长度单独统计（用于体现“有效正文”而非空壳文件）。
+    """
+    data = os.path.join(BASE, "data")
+
+    def parse(raw):
+        head, _, body = raw.partition("\n\n")
+        meta = {}
+        for ln in head.split("\n"):
+            if "=" in ln:
+                k, _, v = ln.partition("=")
+                meta[k.strip()] = v.strip()
+        return meta, body.strip()
+
+    out = {}
+
+    # 主题正文
+    for sub, label in (("sports", "体育"), ("tech", "科技"), ("ent", "娱乐")):
+        folder = os.path.join(data, sub)
+        rows = []
+        if os.path.isdir(folder):
+            for fn in sorted(os.listdir(folder)):
+                if not fn.endswith(".txt"):
+                    continue
+                with open(os.path.join(folder, fn), encoding="utf-8") as f:
+                    meta, body = parse(f.read())
+                rows.append({"file": f"{sub}/{fn}", "title": meta.get("title", ""),
+                             "source": meta.get("source", ""), "chars": len(body)})
+        out[sub] = rows
+
+    # news20（带 group / rewrite）
+    folder = os.path.join(data, "news20")
+    rows = []
+    if os.path.isdir(folder):
+        for fn in sorted(os.listdir(folder)):
+            if not fn.endswith(".txt"):
+                continue
+            with open(os.path.join(folder, fn), encoding="utf-8") as f:
+                meta, body = parse(f.read())
+            rows.append({"idx": int(fn[:3]), "file": f"news20/{fn}",
+                         "title": meta.get("title", ""), "source": meta.get("source", ""),
+                         "group": meta.get("group", ""), "rewrite": meta.get("rewrite", ""),
+                         "chars": len(body)})
+    out["news20"] = rows
+
+    # 标题语料行数
+    tp = os.path.join(data, "titles.txt")
+    out["titles_n"] = sum(1 for ln in open(tp, encoding="utf-8") if ln.strip()) \
+        if os.path.exists(tp) else 0
+    # 用例条数
+    sp = os.path.join(data, "short_texts.txt")
+    out["short_n"] = sum(1 for ln in open(sp, encoding="utf-8") if ln.strip()) \
+        if os.path.exists(sp) else 0
+    return out
+
+
 SUMM = load_summaries()
+SRC = load_source_index()
 TF = SUMM["tfidf"]
 MH = SUMM["minhash"]
 WV = SUMM["wordvec"]
@@ -195,29 +255,126 @@ def build():
     para(doc, "另需说明：本报告的全部指标均由本目录代码现场运行生成，落盘于 out/*_results.txt；"
               "对早期版本结果的逐行对照见 out/_baseline_original/ 与 out/AUDIT_NOTES.md。")
 
-    # ===== 二、实验材料获取 =====
-    h(doc, "二、实验材料获取（真实语料抓取）", 1)
-    para(doc, "本次实验的全部语料均来自互联网真实新闻站点实时抓取，未使用任何现成的标注数据集，"
-              "抓取脚本见 tools/ 目录（scraper.py / fetch.py / fetch_titles.py）。抓取流程与数据规模如下表。")
-    add_table(doc, ["数据文件", "规模", "获取方式", "用途"], [
-        ["data/titles.txt", "2579 条", "网易滚动新闻接口（GBK JSON）+ 新浪滚动新闻 API，多频道分页聚合",
-         "实验一(1) TF-IDF 语料（要求≥500 条）"],
-        ["data/sports/*.txt\ndata/tech/*.txt\ndata/ent/*.txt", "各 50 篇\n（共 150 篇）",
-         "上述接口取标题/链接后，逐篇抓取正文并用 BeautifulSoup 解析（h1 标题 + 正文容器）",
-         "实验二(1) 三类主题文档向量"],
-        ["data/news20/*.txt\n+ manifest.json", "20 篇",
-         "真实新闻为源文：同一事件的多家媒体报道 + 转载改写 + 完全不同主题；"
-         "改写簇由同义词替换、换标题、调段序规则化生成，并写入 group/rewrite 标注",
-         "实验二(2) 加权 SimHash 相似度"],
-        ["data/short_texts.txt", "6 条", "人工设计：完全重复 / 轻度修改 / 中度改写 / 完全不相关四类",
-         "实验一(2) MinHash+LSH 去重"],
-    ], cap="表 2-1 实验材料获取一览", widths=[1.5, 0.9, 3.0, 1.3])
-    para(doc, "每条新闻全文均保存为统一格式：首行 title=、第二行 source=（原始 URL）、第三行 category=，"
-              "空行后为正文，便于溯源与复核（news20 额外含 group= / rewrite= 两行标注）。"
-              "解析时统一按“首个空行”切分元信息与正文。")
+    # ===== 二、结果索引 =====
+    h(doc, "二、结果索引", 1)
+    para(doc, "下表汇总四个实验的核心结果与对应位置，便于直接跳转查阅；"
+              "结果文本与图片均在项目 out/ 目录下。")
+    _w8i = next(s for s in SH["schemes"] if s["name"].startswith("B3s"))
+    _eqi = next(s for s in SH["schemes"] if s["name"].startswith("A1"))
+    add_table(doc, ["实验", "对应章节", "核心结果", "结果文件", "图片"], [
+        ["一(1) TF-IDF 特征表示", "4.1 节",
+         f"语料 {TF['scale']} 条；矩阵 ({TF['matrix_shape'][0]}, {TF['matrix_shape'][1]})；"
+         f"Top-10 余弦相似度（10 个不同文本对）",
+         "out/exp1_tfidf_results.txt", "figures/exp1_tfidf_top20.png"],
+        ["一(2) MinHash + LSH 去重", "4.2 节",
+         f"k=128；估计误差 MAE={MH['minhash_error']['mae']:.4f}；"
+         f"端到端 LSH 加速比（500 篇）"
+         f"{MH['scaling_end2end_ms'][-1]['speedup_lsh64_vs_exact']:.2f}×",
+         "out/exp1_minhash_results.txt",
+         "figures/exp1_minhash_sim.png\nfigures/exp1_minhash_scaling.png"],
+        ["二(1) 预训练词向量", "5.1 节",
+         f"{WV['model']['n_words']} 词 × {WV['model']['dim']} 维；类比命中 "
+         f"{sum(1 for a in WV['analogies'] if a['hit'])}/{len(WV['analogies'])}；"
+         f"KMeans Purity={WV['purity']:.4f}，ARI={WV['ari']:.4f}",
+         "out/exp2_wordvec_results.txt", "figures/exp2_wordvec_pca_tsne.png"],
+        ["二(2) 加权 SimHash", "5.2 节",
+         f"64 位指纹，海明距离 ≤{SH['ham_th']}；等权 F1={_eqi['strict']['F1']:.3f}、"
+         f"TF-IDF 加权 F1={_w8i['strict']['F1']:.3f}（本数据上加权未占优）",
+         "out/exp2_simhash_results.txt", "figures/exp2_simhash_prf.png"],
+    ], cap="表 2-1 四个实验的结果索引", widths=[1.3, 0.6, 2.4, 1.4, 1.35], size=8)
+    para(doc, "结构化结果（机读）：`out/results_summary_{tfidf,minhash,wordvec,simhash}.json`，"
+              "报告正文中的所有数值均取自这些文件。关键代码白底截图见 `out/screenshots/`。")
+
+    # ===== 三、数据来源说明 =====
+    h(doc, "三、数据来源说明", 1)
+    para(doc, "按作业要求，实验数据为“选取或自行准备”，因此本实验的数据由三部分组成："
+              "**真实抓取的新闻语料**、**由真实新闻规则改写得到的构造语料**、**人工设计的测试用例**。"
+              "下面逐类说明规模、来源、清洗方式与保存位置。")
+
+    h(doc, "3.1 四类数据一览", 3)
+    add_table(doc, ["数据", "规模", "性质", "来源与获取方式", "保存位置"], [
+        ["标题语料", f"{TF['raw_scale']} 条", "真实抓取",
+         "新浪滚动新闻 API（feed.mix.sina.com.cn/api/roll/get，多 lid 频道分页）"
+         "＋网易滚动新闻接口（temp.163.com/special/00804KVA/cm_{频道}.js）",
+         "data/titles.txt"],
+        ["主题正文", "体育/科技/娱乐各 50 篇\n（共 150 篇）", "真实抓取",
+         "由上述接口取得标题与链接后，逐篇抓取详情页正文；"
+         "用 BeautifulSoup 按 h1 标题 + 正文容器解析，剔除来源/责任编辑尾注",
+         "data/sports/　data/tech/　data/ent/"],
+        ["news20 语料", "20 篇\n（含分组标注）", "真实源文 + 规则改写",
+         "14 篇取自上述真实新闻作为源文；其中 R1/R2 各 4 篇由源文经"
+         "「换标题、同义词替换、段落调序」规则派生；D1/D2/D3 为真实的多源报道",
+         "data/news20/　+ manifest.json"],
+        ["去重测试用例", "6 条", "人工设计",
+         "人工撰写，覆盖完全重复 / 轻度修改 / 中度改写 / 完全不相关四类",
+         "data/short_texts.txt"],
+    ], cap="表 3-1 四类数据的规模、性质与来源", widths=[0.95, 1.1, 1.0, 2.55, 1.05], size=8.5)
+
+    h(doc, "3.2 数据清洗方式", 3)
+    for s in [
+        f"**标题语料**：多频道分页聚合后按标题去重；计算前再按「去空白 + 统一小写」规范化，"
+        f"消除仅排版差异的伪重复（{TF['raw_scale']} → {TF['scale']} 条）。"
+        f"分词使用 jieba，去除停用词（内置词表 + data/stopwords/ 下三份公开停用词表）"
+        f"与纯数字/纯标点 token。",
+        "**主题正文**：统一保存为「title= / source= / category= + 空行 + 正文」格式，"
+        "其中 source= 保留了原始 URL，可直接逐篇点击核对。解析时按**首个空行**切分元信息与正文，"
+        "避免把元信息当作正文词混入。",
+        "**news20**：在统一格式基础上额外写入 group=（分组）与 rewrite=（改写类型）两行，"
+        "这两行只作为标注元信息，**不参与指纹计算**。",
+        "**人工用例**：6 条短文本每行一条，仅做去停用词与长度过滤。",
+        f"**关于标题语料的溯源限制（如实说明）**：`data/titles.txt` 按「每行一条文本」保存，"
+        f"**未保留逐条来源链接**，因此无法逐条点开核对；"
+        f"可确认的是抓取渠道与去重、清洗方式（见上表与 tools/fetch_titles.py）。"
+        f"三类主题正文与 news20 均带 source= 原始 URL，可逐篇核对。",
+    ]:
+        para(doc, s)
+
+    h(doc, "3.3 20 篇新闻语料明细", 3)
+    para(doc, "下表逐篇列出 news20 的标题、来源、分组与性质，便于核对“真新闻 / 人工改写”的边界。"
+              "**改写行指向其父源文，不另造原文链接。**")
+    _news = SRC["news20"]
+    _rows = []
+    for r in _news:
+        if r["group"] in ("R1", "R2") and r["rewrite"]:
+            nature = "人工改写"
+            note = {"reprint-title": "换标题，正文同源文",
+                    "light-rewrite": "轻度改写：同义词替换 + 加转载声明",
+                    "medium-rewrite": "中度改写：段落调序 + 更多同义词替换"}.get(
+                        r["rewrite"], r["rewrite"])
+        else:
+            nature = "真实原文"
+            note = "被改写簇的父源文" if r["group"] in ("R1", "R2") else "独立报道"
+        _rows.append([r["idx"], r["title"][:30], r["group"], nature,
+                      note, r["source"] or "（未记录）"])
+    add_table(doc, ["编号", "标题", "分组", "性质", "备注", "来源链接"], _rows,
+              cap="表 3-2 news20 的 20 篇语料明细（人工改写行指向父源文）",
+              widths=[0.4, 1.7, 0.45, 0.7, 1.5, 1.65], size=7)
+
+    h(doc, "3.4 分组标签的含义与用途", 3)
+    _gc2 = SH["gold"]["categories"]
+    para(doc, "news20 的分组标签用于构造相似度实验的评测口径。需要明确区分三类：")
+    add_table(doc, ["分组", "篇数", "含义", "在评估中的角色"], [
+        ["R1 / R2", "各 4", "转载改写簇：同一篇新闻的源文 + 换标题转载 + 轻度改写 + 中度改写",
+         f"**正样本**：组内两两共 {_gc2['POSITIVE']['n']} 对，是 SimHash 应判为重复的目标"],
+        ["D1 / D2", "各 3", "同一事件的不同媒体报道（真实新闻，行文各异）",
+         f"**不参与 P/R/F1**（{_gc2['EXCLUDED']['n']} 对）：事件相同但文本不重叠，"
+         f"不属于“近似重复”范畴"],
+        ["D3", "3", "原标注为同一事件，复核后发现是**不同事件**（女子现代五项夺金 vs 男子铁人三项摘银）",
+         f"**不参与 P/R/F1**（{_gc2['UNCERTAIN']['n']} 对）：标注有误，已在评估中排除"],
+        ["U1~U3", "各 1", "完全不同主题（互不相关）",
+         "**负样本一侧**：与任何文本都不构成重复对"],
+    ], cap="表 3-3 news20 分组标签的含义与评估角色",
+        widths=[0.75, 0.5, 2.6, 2.65], size=8)
+    para(doc, "两点必须说清楚：① **“不参与评价”不等于“已标注为不重复”**——"
+              "D1/D2 在“同一事件检索”这个任务里仍然是相关的正例，只是不属于本次“近似去重”的评测目标；"
+              "② **分组依据是人工阅读内容后的判断，不是相似度分数**——"
+              "实测 D3（不同事件）与 D1/D2（同一事件）的组内相似度区间是重叠的，"
+              "靠分数阈值无法自动分开，所以必须逐篇读过再定分组。")
+    para(doc, "现行正样本由 **R1 与 R2 两个改写簇**产生（各 C(4,2)=6 对，共 12 对）。"
+              "D1、D2、D3 均不参与 P/R/F1 计算。完整的分层依据与组内相似度见 5.2.3 节。")
 
     # ===== 三、实验题目一 =====
-    h(doc, "三、实验题目一：文本特征表示与短文本去重", 1)
+    h(doc, "四、实验题目一：文本特征表示与短文本去重", 1)
 
     # ---------- 3.1 TF-IDF ----------
     scale, shape = str(TF["scale"]), f"({TF['matrix_shape'][0]}, {TF['matrix_shape'][1]})"
@@ -245,12 +402,12 @@ def build():
         ["模板化标题占比", f"{TF['template_stats']['n_template']} / {TF['scale']} "
                            f"({pct(TF['template_stats']['ratio'])})"],
     ]
-    h(doc, "3.1 基于 TF-IDF 的文本特征表示与相似度检索", 2)
-    h(doc, "3.1.1 实验目的", 3)
+    h(doc, "4.1 基于 TF-IDF 的文本特征表示与相似度检索", 2)
+    h(doc, "4.1.1 实验目的", 3)
     para(doc, "掌握基于 TF-IDF 的文本特征提取方法，理解词袋模型（Bag-of-Words）与词向量的区别；"
               "能够用余弦相似度度量文档相似性，并借助可视化分析词的权重分布。")
 
-    h(doc, "3.1.2 算法原理", 3)
+    h(doc, "4.1.2 算法原理", 3)
     para(doc, "TF-IDF（Term Frequency–Inverse Document Frequency）由词频 TF 与逆文档频率 IDF 相乘得到，"
               "用于衡量一个词对某篇文档的区分能力：")
     for f in ["TF(t, d) = 词 t 在文档 d 中出现的次数 / 文档 d 的总词数；",
@@ -267,39 +424,39 @@ def build():
               "计算两向量夹角的余弦值 cos(A,B) = (A·B) / (|A||B|)，取值在 [0,1] 之间，越接近 1 越相似。"
               "余弦相似度对文档长度不敏感，适合长短不一的新闻文本。")
 
-    h(doc, "3.1.3 关键代码解读", 3)
+    h(doc, "4.1.3 关键代码解读", 3)
     add_image(doc, os.path.join(SHOT, "exp1_tfidf_core.png"),
-              "图 3-1 TF-IDF 特征构建与 Top-10 相似对检索（白底代码截图）")
+              "图 4-1 TF-IDF 特征构建与 Top-10 相似对检索（白底代码截图）")
     para(doc, f"代码要点：① jieba 分词后去除停用词与纯标点/数字，用空格连接为 TfidfVectorizer 可识别的输入；"
               f"② 以 max_features=1000、ngram_range=(1,2) 构建 TF-IDF 矩阵，实际得到 {shape}；"
               f"③ 只在**上三角**（i<j）中排序取前 10。这一点很关键：早期实现先 fill_diagonal(-1)、"
               f"再对展平后的整个矩阵 argsort，会把 (i,j) 与 (j,i) 当成两个不同的结果同时取到，"
               f"使“Top-10”实际只包含约 5 个不同的文本对；改用 np.triu_indices 后每一个文本对只出现一次。")
     add_image(doc, os.path.join(SHOT, "exp1_tfidf_dedup.png"),
-              "图 3-2 语料规范化与去重（normalize_title / dedup_titles）")
+              "图 4-2 语料规范化与去重（normalize_title / dedup_titles）")
     para(doc, "代码要点：先把标题的空格全部压缩掉并统一小写，再按该键去重并统计移除条数。"
               "这样既消除了“仅排版不同”的伪重复，又不改动原始语料文件，便于复核。")
     add_image(doc, os.path.join(SHOT, "exp1_tfidf_weight_lookup.png"),
-              "图 3-3 TF-IDF 权重回查：大小写对齐与“是否进入特征集”标记")
+              "图 4-3 TF-IDF 权重回查：大小写对齐与“是否进入特征集”标记")
     para(doc, "代码要点：回查权重时用 w.lower() 与 TfidfVectorizer(lowercase=True) 的特征名对齐；"
               "同时记录该词是否命中特征集，输出为独立的“进入特征集”列。"
               "早期实现用原始大小写去查 feature_names，导致含英文的词必然查不到而被误判为权重 0。")
 
-    h(doc, "3.1.4 实验结果", 3)
+    h(doc, "4.1.4 实验结果", 3)
     para(doc, f"语料规模：{scale} 条中文新闻标题（满足 ≥500 条要求）；TF-IDF 矩阵形状：{shape}。")
     add_table(doc, ["统计项", "数值"], tm_stats,
-              cap="表 3-1 语料规范化与相似度分布统计", widths=[3.0, 2.0])
+              cap="表 3-4 语料规范化与相似度分布统计", widths=[3.0, 2.0])
     add_table(doc, ["排名", "余弦相似度", "文本 A", "文本 B"],
               [[i + 1, f"{float(s):.4f}", f"[{a}] {ta[:34]}", f"[{b}] {tb[:34]}"]
                for i, (s, a, ta, b, tb) in enumerate(pairs)],
-              cap="表 3-2 相似度最高的 Top-10 文本对", widths=[0.5, 0.9, 2.4, 2.4])
+              cap="表 4-1 相似度最高的 Top-10 文本对", widths=[0.5, 0.9, 2.4, 2.4])
     add_table(doc, ["词", "词频", "平均 TF-IDF 权重", "进入特征集"],
               [[w, fq, wx, ok] for w, fq, wx, ok in words],
-              cap="表 3-3 词频最高的 20 个词及其平均 TF-IDF 权重", widths=[1.2, 1.0, 1.8, 1.2])
+              cap="表 4-2 词频最高的 20 个词及其平均 TF-IDF 权重", widths=[1.2, 1.0, 1.8, 1.2])
     add_image(doc, os.path.join(FIG, "exp1_tfidf_top20.png"),
-              "图 3-4 词频最高的 20 个词的 TF-IDF 权重柱状图")
+              "图 4-4 词频最高的 20 个词的 TF-IDF 权重柱状图")
 
-    h(doc, "3.1.5 结果分析", 3)
+    h(doc, "4.1.5 结果分析", 3)
     _top20 = TF["top20_words"]
     _top1 = _top20[0]
     _freq_sorted = sorted(_top20, key=lambda w: -w["weight"])
@@ -332,7 +489,7 @@ def build():
         f"这正是词袋模型“只看词共现、不看词序与关键实体”的固有天花板。"
         f"（全语料 {TF['similarity']['n_pairs']:,} 个文本对的相似度均值仅 {fmt(TF['similarity']['mean'])}、"
         f"P99 为 {fmt(_p99)}，说明绝大多数文本对其实并不相似，高相似是局部现象。）",
-        f"词频与 TF-IDF 权重并非正相关（表 3-3、图 3-4）：高频词"
+        f"词频与 TF-IDF 权重并非正相关（表 4-3、图 4-4）：高频词"
         f"“{_most_freq['word']}（{_most_freq['freq']} 次）”的平均权重只有 {fmt(_most_freq['weight'])}，"
         f"因为它们在大量文档中共同出现、IDF 很低；而“{_best_w['word']}”词频仅 {_best_w['freq']} 次，"
         f"平均权重却最高（{fmt(_best_w['weight'])}）。同理表中其余高权重词也都集中于少数文档，"
@@ -367,12 +524,12 @@ def build():
                   "近重复" if p["minhash"] >= MH["config"]["verify_threshold"]
                   else "候选但被阈值滤除(同事件改写)")
                  for p in MH["case_pairs"] if p["pair"] in _b64]
-    h(doc, "3.2 基于 MinHash + LSH 的短文本近似去重", 2)
-    h(doc, "3.2.1 实验目的", 3)
+    h(doc, "4.2 基于 MinHash + LSH 的短文本近似去重", 2)
+    h(doc, "4.2.1 实验目的", 3)
     para(doc, "理解并实现基于 Jaccard 系数与 MinHash 的近似文本去重，掌握 LSH 分桶的近似近邻查找思想；"
               "通过对比精确计算与近似计算，量化二者在准确率与运行时间上的差异，并分析阈值的影响。")
 
-    h(doc, "3.2.2 算法原理", 3)
+    h(doc, "4.2.2 算法原理", 3)
     para(doc, "（1）Jaccard 相似度。把文本表示为 shingle（n-gram）集合，两集合的 Jaccard 相似度为 "
               "J(A,B) = |A∩B| / |A∪B|。本实验采用词级 1+2-gram：既保留单个词，也保留相邻词对（用“|”连接），"
               "在字面重合与语义容忍之间取得平衡（纯字符 5-gram 对中度改写会因词序调整而失效）。")
@@ -384,7 +541,7 @@ def build():
               "只有至少一个 band 完全相同的文档对才进入候选集，从而把 O(n²) 的比较量降到近似 O(n)；"
               "对候选对再用 MinHash 相似度精确回验。band 数越多、r 越小，召回越高但候选越多（精确率下降）。")
 
-    h(doc, "3.2.3 测试用例设计", 3)
+    h(doc, "4.2.3 测试用例设计", 3)
     _pm = {p["pair"]: p for p in MH["case_pairs"]}
     para(doc, "共设计 6 条短文本用例，覆盖完全重复、轻度修改、中度改写、完全不相关四类。"
               "需要强调的是：这 6 条用例内部其实有**三个相似度量级**，因此金标准必须分层，"
@@ -398,7 +555,7 @@ def build():
         ["T4", "卫冕成功！现代五项女子团体为中国队拿下本届亚运会第一枚金牌", "中度改写（换句序/同义替换）", "同事件改写（J=0.12~0.19）"],
         ["T5", "马斯克否认特斯拉向xAI投资五十亿美元参股计划", "完全不相关（同领域不同事件）", "不相关（J=0）"],
         ["T6", "佟丽娅公开回应与陈思诚的离婚传闻，称两人早已分开", "完全不相关（不同领域）", "不相关（J=0）"],
-    ], cap="表 3-4 MinHash+LSH 实验的 6 个测试用例与分层", widths=[0.55, 3.9, 1.55, 1.4])
+    ], cap="表 4-3 MinHash+LSH 实验的 6 个测试用例与分层", widths=[0.55, 3.9, 1.55, 1.4])
     para(doc, f"分层规则：**近重复 = {'、'.join(MH['gold']['near_dup_pairs'])}**（字面几乎一致，"
               f"{MH['gold']['near_dup']} 对）；**同事件改写 = "
               f"{'、'.join(MH['gold']['same_event_pairs'])}**（事件相同但句子结构重写，不计入"
@@ -407,52 +564,52 @@ def build():
               f"报告同时给出“初版混合口径”（T1~T4 两两共 {MH['gold']['mixed_related']} 对）"
               f"与“分层口径”两套指标，便于对照。")
 
-    h(doc, "3.2.4 关键代码解读", 3)
+    h(doc, "4.2.4 关键代码解读", 3)
     add_image(doc, os.path.join(SHOT, "exp1_minhash_update.png"),
-              "图 3-5 MinHash 签名生成（k=128，exp1_minhash.py）")
+              "图 4-5 MinHash 签名生成（k=128，exp1_minhash.py）")
     para(doc, "代码要点：签名初始化为一维 k 长数组（初值 P）；对集合中每个 shingle 计算其 64 位整数哈希后，"
               "逐个哈希函数取最小值。实现上刻意使用纯 Python 大整数运算而非 numpy 向量化："
               "因为 a_i·x 的量级接近 2¹²²，超出 numpy int64 的范围会造成溢出，属于典型的“数学正确但工程踩坑”问题。")
     add_image(doc, os.path.join(SHOT, "exp1_lsh.png"),
-              "图 3-6 LSH 分桶与候选对生成（build_lsh_tables / lsh_candidates）")
+              "图 4-6 LSH 分桶与候选对生成（build_lsh_tables / lsh_candidates）")
     para(doc, "代码要点：把签名按 band 切片并作为 dict 的 key 建立倒排桶；同一桶内文档两两组合即为候选对，"
               "用 set 去重。整个过程只需一次线性扫描，避免了全量两两比较。")
     add_image(doc, os.path.join(SHOT, "exp1_minhash_prf.png"),
-              "图 3-7 P/R/F1 计算（prf）——分母为空时返回 0 并同时输出 TP/FP/FN")
+              "图 4-7 P/R/F1 计算（prf）——分母为空时返回 0 并同时输出 TP/FP/FN")
     para(doc, "代码要点：早期实现把“没有预测”时的查准率定义为 1.0，于是出现“一对都没检出却 F1 = 1.000”"
               "的荒谬结论。修正为分母为空时取 0，并让函数同时返回 TP/FP/FN，"
               "使“无预测”与“全对”在结果里不可能再被混淆。")
     add_image(doc, os.path.join(SHOT, "exp1_minhash_bench.png"),
-              "图 3-8 端到端计时的三条路径（bench_exact / bench_minhash / bench_lsh）")
+              "图 4-8 端到端计时的三条路径（bench_exact / bench_minhash / bench_lsh）")
     para(doc, "代码要点：三条路径都必须能独立完成“从原始文本到给出重复判定对”，"
               "并把 shingle 构建（公共成本）单独计时、不计入比较阶段；"
               "每个规模先用同一批 shingle 预热一次，再重复计时取中位数，"
               "计时期间关闭 GC 以抑制抖动。这样得到的加速比才是同一任务下的可比数字。")
 
-    h(doc, "3.2.5 实验结果", 3)
+    h(doc, "4.2.5 实验结果", 3)
     rows3 = [[f"T{i}-T{j}", jac, mh, ("是" if mark else "否")] for i, j, jac, mh, mark in sims]
     add_table(doc, ["文本对", "精确 Jaccard", "MinHash 估计", "进入 LSH 候选"], rows3,
-              cap="表 3-5 各文本对的精确 Jaccard 与 MinHash 估计对比", widths=[1.4, 1.6, 1.6, 1.6])
+              cap="表 4-4 各文本对的精确 Jaccard 与 MinHash 估计对比", widths=[1.4, 1.6, 1.6, 1.6])
     para(doc, f"MinHash 估计的平均绝对误差为 {fmt(MH['minhash_error']['mae'])}，"
               f"最大误差 {fmt(MH['minhash_error']['max'])}，"
               f"说明 k=128 的签名已能高精度逼近真实 Jaccard（签名长度越长误差越小，误差量级约为 1/√k）。")
 
     rows_mixed = [[f"{t}", f"{p1}/{r1}/{f1}", f"{p2}/{r2}/{f2}"] for t, p1, r1, f1, p2, r2, f2 in thr_mixed]
     add_table(doc, ["相似度阈值", "精确 Jaccard（P/R/F1）", "MinHash（P/R/F1）"], rows_mixed,
-              cap="表 3-6 阈值影响（初版混合口径：ground truth = T1~T4 两两，共 6 对）",
+              cap="表 4-5 阈值影响（初版混合口径：ground truth = T1~T4 两两，共 6 对）",
               widths=[1.4, 2.3, 2.3])
     rows_thr = [[f"{t}", f"{p1}/{r1}/{f1}", f"{p2}/{r2}/{f2}"] for t, p1, r1, f1, p2, r2, f2 in thr]
     add_table(doc, ["相似度阈值", "精确 Jaccard（P/R/F1）", "MinHash（P/R/F1）"], rows_thr,
-              cap="表 3-7 阈值影响（分层口径：ground truth = 近重复对 T1-T2）", widths=[1.4, 2.3, 2.3])
+              cap="表 4-6 阈值影响（分层口径：ground truth = 近重复对 T1-T2）", widths=[1.4, 2.3, 2.3])
 
     lsh_rows = []
     for bi, ri, cnt in lsh:
         lsh_rows.append([f"b={bi}, r={ri}", cnt, "—"])
     add_table(doc, ["LSH 配置", "候选对数", "说明"], lsh_rows,
-              cap="表 3-8 两种 LSH 分桶参数下的候选对数量", widths=[1.6, 1.4, 3.0])
+              cap="表 4-7 两种 LSH 分桶参数下的候选对数量", widths=[1.6, 1.4, 3.0])
     rows5 = [[f"T{i}-T{j}", mh, st] for i, j, mh, st in lsh_items]
     add_table(doc, ["候选文本对（b=64, r=2）", "MinHash 相似度", "回验结论"], rows5,
-              cap="表 3-9 LSH 候选对的相似度回验", widths=[1.6, 1.6, 1.6])
+              cap="表 4-8 LSH 候选对的相似度回验", widths=[1.6, 1.6, 1.6])
 
     _rows6 = []
     for r in MH["scaling_end2end_ms"]:
@@ -467,7 +624,7 @@ def build():
         ])
     add_table(doc, ["文档数", "精确 Jaccard", "MinHash 全量两两", "LSH b16r8", "LSH b64r2",
                     "全量对数", "候选数\nb16r8 / b64r2", "LSH 加速比\n(b64r2 vs 精确)"], _rows6,
-              cap=f"表 3-10 批量规模对端到端耗时的影响（真实标题语料；{MH['config']['reps']} 次重复，"
+              cap=f"表 4-9 批量规模对端到端耗时的影响（真实标题语料；{MH['config']['reps']} 次重复，"
                   f"中位数±标准差，单位毫秒；shingle 构建为公共成本，未计入）",
               widths=[0.62, 1.15, 1.15, 1.0, 1.0, 0.8, 1.0, 1.05], size=7.5)
     _stg = MH["stage_breakdown_500_ms"]
@@ -475,12 +632,12 @@ def build():
         ["shingle 构建 + 签名生成", f"{_stg['shingle_and_signature']:.2f}", "一次性成本；k=128 向量化计算"],
         ["LSH 建桶 + 候选生成", f"{_stg['lsh_build_and_candidates']:.2f}", "不含签名生成"],
         ["候选回验", f"{_stg['candidate_verify']:.2f}", f"{_stg['n_candidates']} 对候选做签名比对"],
-    ], cap="表 3-11 分阶段耗时拆解（用于定位瓶颈）", widths=[2.2, 1.2, 2.6])
+    ], cap="表 4-10 分阶段耗时拆解（用于定位瓶颈）", widths=[2.2, 1.2, 2.6])
     add_image(doc, os.path.join(FIG, "exp1_minhash_sim.png"),
-              "图 3-9 MinHash 估计 vs 精确 Jaccard（左）与两种金标准口径下的 F1（右）")
+              "图 4-9 MinHash 估计 vs 精确 Jaccard（左）与两种金标准口径下的 F1（右）")
     add_image(doc, os.path.join(FIG, "exp1_minhash_scaling.png"),
-              "图 3-10 批量规模对端到端计算耗时的影响（对数纵轴，误差棒=标准差）")
-    h(doc, "3.2.6 结果分析", 3)
+              "图 4-10 批量规模对端到端计算耗时的影响（对数纵轴，误差棒=标准差）")
+    h(doc, "4.2.6 结果分析", 3)
     _pairs_mh = {p["pair"]: p for p in MH["case_pairs"]}
     _sc = {r["n"]: r for r in MH["scaling_end2end_ms"]}
     _n500, _n200, _n50 = _sc.get(500), _sc.get(200), _sc.get(50)
@@ -500,7 +657,7 @@ def build():
         f"完全不相关的 T5、T6 与其余文本精确值与估计值均为 0.0000。"
         f"整体平均绝对误差仅 {fmt(MH['minhash_error']['mae'])}（最大 {fmt(MH['minhash_error']['max'])}，"
         f"标准差 {fmt(MH['minhash_error']['std'])}），验证了 MinHash 作为 Jaccard 无偏估计的有效性。",
-        f"金标准分层如何改变结论（表 3-6 vs 表 3-7）：这是本次实验最有价值的一处修正。"
+        f"金标准分层如何改变结论（表 4-6 vs 表 4-7）：这是本次实验最有价值的一处修正。"
         f"在**混合口径**下（把 T1~T4 两两都当重复，{MH['gold']['mixed_related']} 对），"
         f"阈值 {_t1['t']} 处精确方法 F1 为 {fmt(_t1['mixed_exact'][2], 3)}、"
         f"近似方法 F1 为 {fmt(_t1['mixed_min'][2], 3)}，看起来“阈值取 {_t1['t']} 就是最优”；"
@@ -522,7 +679,7 @@ def build():
         f"差异来自 T3-T4 的估计值 {fmt(_pairs_mh['T3-T4']['minhash'])} 被压到阈值以下"
         f"（精确值 {fmt(_pairs_mh['T3-T4']['jaccard'])} 高于阈值）。"
         f"这正是近似算法“用少量精度换取大量效率”的本质——误差可控且可解释。",
-        f"LSH 分桶参数的取舍（表 3-8、3-9）：(b=16, r=8) 只产生 {_lsh168['n']} 对候选"
+        f"LSH 分桶参数的取舍（表 4-8、3-9）：(b=16, r=8) 只产生 {_lsh168['n']} 对候选"
         f"（{('、'.join(_lsh168['pairs']) if _lsh168['pairs'] else '无')}），"
         f"把同事件改写的相似对基本全部漏掉；(b=64, r=2) 产生 {_lsh642['n']} 对候选，"
         f"覆盖了全部 T1~T4 之间的相似对。候选阶段相对本实验的 gold 是零误报；"
@@ -530,7 +687,7 @@ def build():
         f"这恰好演示了工业界的三段式做法：**LSH 粗筛候选 → MinHash 相似度回验 → 阈值判定**。"
         f"（需强调：初版把“未达到回验阈值”标成“误报”，是把算法自身分数当成了真值，"
         f"错误类型被颠倒；本版区分为“近重复”“候选但被阈值滤除（同事件改写）”“误报”三类。）",
-        f"运行时间与规模（表 3-10、图 3-10）——这里必须交代一个重要的口径修正："
+        f"运行时间与规模（表 4-10、图 4-10）——这里必须交代一个重要的口径修正："
         f"初版把 LSH 列写成“复用已生成的签名、只计建桶”，既不含签名生成也不含候选回验，"
         f"而精确列是完整任务，**这不是同一个任务，不能据此宣称加速**。"
         f"本版三条路径都改为端到端（从 shingle 到最终判定对），并重复 {MH['config']['reps']} 次取中位数，"
@@ -542,7 +699,7 @@ def build():
         f"{_n50['speedup_lsh64_vs_exact']:.2f}×）。"
         f"也就是说：**在 200 条以下的小规模，LSH 因签名生成的固定开销反而更慢；"
         f"到 500 条才开始体现优势**。",
-        f"瓶颈在哪里（表 3-10 下方的分阶段拆解）：n=500 时签名生成 "
+        f"瓶颈在哪里（表 4-10 下方的分阶段拆解）：n=500 时签名生成 "
         f"{_st['shingle_and_signature']:.1f} ms（一次性成本）、建桶+候选生成 "
         f"{_st['lsh_build_and_candidates']:.1f} ms、候选回验（{_st['n_candidates']} 对）"
         f"{_st['candidate_verify']:.1f} ms。可见 **k=128 的签名生成本身就是主要开销**。"
@@ -562,7 +719,7 @@ def build():
         para(doc, s)
 
     # ===== 四、实验题目二 =====
-    h(doc, "四、实验题目二：文本相似度计算", 1)
+    h(doc, "五、实验题目二：文本相似度计算", 1)
 
     # ---------- 4.1 词向量 ----------
     model = (f"{WV['model']['n_words']} 词 x {WV['model']['dim']} 维 "
@@ -575,11 +732,11 @@ def build():
     conf = [(["体育", "科技", "娱乐"][i], str(WV["confusion"][i])) for i in range(3)]
     cover = (f"{pct(WV['vocab_coverage']['overall'])} "
              f"({WV['vocab_coverage']['hit']}/{WV['vocab_coverage']['total']})",)
-    h(doc, "4.1 基于预训练词向量的文本表示与语义分析", 2)
-    h(doc, "4.1.1 实验目的", 3)
+    h(doc, "5.1 基于预训练词向量的文本表示与语义分析", 2)
+    h(doc, "5.1.1 实验目的", 3)
     para(doc, "掌握使用预训练词向量进行文本表示的方法，理解 Word2Vec 与 GloVe 的差异；"
               "验证词向量的语义推理能力，并通过文档向量与聚类/降维可视化观察主题分布。")
-    h(doc, "4.1.2 预处理说明", 3)
+    h(doc, "5.1.2 预处理说明", 3)
     para(doc, "本实验使用腾讯 AI Lab 中文词向量。原版模型体积达数 GB，官方下载链接已失效，"
               "故改用其官方发布的 800 万词轻量版（Light 版，143613 词 × 200 维，116 MB），"
               "由 gensim 以 Word2Vec 二进制格式直接加载。")
@@ -590,14 +747,14 @@ def build():
         ["向量头部", WV["model"]["header"] + "（词数 维度）"],
         ["加载方式", WV["model"]["loader"]],
         ["是否随包提交", "否（体积过大；作业亦要求不提交大型预训练模型文件）"],
-    ], cap="表 4-1 预训练词向量的身份锁定（SHA-256 由脚本在加载时现场计算并写入结果 JSON）",
+    ], cap="表 4-11 预训练词向量的身份锁定（SHA-256 由脚本在加载时现场计算并写入结果 JSON）",
         widths=[1.5, 4.5], size=8)
     para(doc, "**为什么要锁到 SHA-256**：同为“腾讯 AI Lab 200 维轻量版”的不同文件，"
               "词表内容与向量值可能不同，仅凭文件名与词数无法独立核验。"
               "上表数值由 `exp2_wordvec.py` 在运行时对模型文件现场计算，"
               "并写入 `out/results_summary_wordvec.json` 的 `model` 字段，可用于独立比对。")
 
-    h(doc, "4.1.3 算法原理", 3)
+    h(doc, "5.1.3 算法原理", 3)
     para(doc, "（1）Word2Vec 与 GloVe 的差异。Word2Vec（本实验使用的模型家族）是预测式方法："
               "CBOW 用上下文预测中心词、Skip-gram 用中心词预测上下文，本质是训练一个浅层神经网络，"
               "词向量是该网络的副产物。GloVe 是计数式方法：先统计全局共现矩阵，再对其做加权最小二乘分解，"
@@ -614,33 +771,33 @@ def build():
               "KMeans 在 200 维文档向量上做 K=3 聚类，用聚类纯度 Purity 与调整兰德指数 ARI 衡量"
               "“无监督聚类结果与真实主题的一致性”。")
 
-    h(doc, "4.1.4 关键代码解读", 3)
+    h(doc, "5.1.4 关键代码解读", 3)
     add_image(doc, os.path.join(SHOT, "exp2_wordvec_load.png"),
-              "图 4-1 Gensim 加载预训练词向量与语义推理（白底代码截图）")
+              "图 5-1 Gensim 加载预训练词向量与语义推理（白底代码截图）")
     para(doc, "代码要点：用 KeyedVectors.load_word2vec_format 加载二进制模型；"
               "类比推理的正负样本方向必须写对——欲求 a − b + c，应传 positive=[a, c]、negative=[b]。"
               "本实验最初写反为 positive=[b, c]、negative=[a]，结果返回“是男人”这类错误答案，修正后正确命中“王后”。")
     add_image(doc, os.path.join(SHOT, "exp2_parse_doc.png"),
-              "图 4-2 新闻文件元信息解析：按首个空行严格切分（parse_doc）")
+              "图 5-2 新闻文件元信息解析：按首个空行严格切分（parse_doc）")
     para(doc, "代码要点：元信息块与正文之间有一个空行，必须按**首个空行**切分。"
               "早期实现用 raw.split(\"\\n\", 3)[3] 取正文，只切掉 3 个换行，"
               "结果把 news20 特有的 group= / rewrite= 两行当成正文词混入文档（实测 doc 01 的正文以"
               "“group=R1\\nrewrite=\\n\\n\\n智东西…”开头），会虚增词表覆盖率。"
               "本实验的三个主题目录没有这两行，因此主题文档向量结果不受影响，但该缺陷一旦遇到带标注的语料就会污染向量。")
     add_image(doc, os.path.join(SHOT, "exp2_docvector.png"),
-              "图 4-3 词向量平均池化生成文档向量（doc_vector）")
+              "图 5-3 词向量平均池化生成文档向量（doc_vector）")
     para(doc, "代码要点：只累加词表中存在的词向量（OOV 词直接跳过），并同时返回命中词数与总词数，"
               "以便统计词表覆盖率；若一篇文档所有词都不在词表则返回 None 并丢弃，避免产生零向量污染聚类与可视化。")
     add_image(doc, os.path.join(SHOT, "exp2_kmeans.png"),
-              "图 4-4 KMeans 文本聚类与 Purity/ARI 评估（白底代码截图）")
+              "图 5-4 KMeans 文本聚类与 Purity/ARI 评估（白底代码截图）")
 
-    h(doc, "4.1.5 实验结果", 3)
+    h(doc, "5.1.5 实验结果", 3)
     para(doc, f"模型信息：{model}。")
     add_table(doc, ["向量运算", "期望词", "实际 Top-3（含余弦相似度）"],
               [[f"{a}−{b}+{c}", f"≈{e}", top + (" ★" if hit else "")] for a, b, c, e, top, hit in anas],
-              cap="表 4-2 词向量类比推理结果", widths=[1.6, 1.0, 3.4])
+              cap="表 5-1 词向量类比推理结果", widths=[1.6, 1.0, 3.4])
     add_table(doc, ["词对", "余弦相似度"], [[f"sim({w1}, {w2})", s] for w1, w2, s in wpairs],
-              cap="表 4-3 12 组词对的余弦相似度", widths=[2.4, 2.4])
+              cap="表 5-2 12 组词对的余弦相似度", widths=[2.4, 2.4])
     add_table(doc, ["指标", "数值"], [
         ["类内平均相似度（同主题文档两两）", intra[0]],
         ["类间平均相似度（跨主题文档两两）", intra[1]],
@@ -648,13 +805,13 @@ def build():
         ["调整兰德指数 ARI", km[1]],
         ["文档向量 L2 归一化（聚类与余弦同口径）", "是" if WV["normalize_docvec"] else "否"],
         ["词表覆盖率（命中词数/总词数）", cover[0]],
-    ], cap="表 4-4 文档向量的主题可分性与聚类效果", widths=[3.4, 1.6])
+    ], cap="表 5-3 文档向量的主题可分性与聚类效果", widths=[3.4, 1.6])
     add_table(doc, ["真实主题", "三个聚类簇中的样本数"], [[n, c] for n, c in conf],
-              cap="表 4-5 KMeans 混淆矩阵（行=真实主题，列=聚类簇）", widths=[1.6, 3.4])
+              cap="表 5-4 KMeans 混淆矩阵（行=真实主题，列=聚类簇）", widths=[1.6, 3.4])
     add_image(doc, os.path.join(FIG, "exp2_wordvec_pca_tsne.png"),
-              "图 4-5 文档向量 PCA / t-SNE 降维可视化与 KMeans 聚类结果")
+              "图 5-5 文档向量 PCA / t-SNE 降维可视化与 KMeans 聚类结果")
 
-    h(doc, "4.1.6 结果分析", 3)
+    h(doc, "5.1.6 结果分析", 3)
     _hit = [a for a in WV["analogies"] if a["hit"]]
     _miss = [a for a in WV["analogies"] if not a["hit"]]
     _hit_txt = "、".join(f"{a['a']}−{a['b']}+{a['c']}→{a['expect']}"
@@ -702,12 +859,12 @@ def build():
         f"归一化是实测有益的：不归一化时 Purity/ARI 为 "
         f"{fmt(WV['purity_no_norm'])}/{fmt(WV['ari_no_norm'])}，"
         f"归一化后提升到 {fmt(WV['purity'])}/{fmt(WV['ari'])}。",
-        "词表覆盖率（表 4-4）：150 篇文档共 74339 个内容词，其中 66465 个能在 143613 词的轻量版词表中命中，"
+        "词表覆盖率（表 5-4）：150 篇文档共 74339 个内容词，其中 66465 个能在 143613 词的轻量版词表中命中，"
         "整体覆盖率 89.41%（体育 82.63% / 科技 90.31% / 娱乐 90.84%）。"
         "体育类覆盖率最低，主要是运动员姓名、队名等专有名词不在轻量版词表内——"
         "平均池化会直接丢弃这些 OOV 词，而它们恰恰是体育新闻最有区分度的信息。"
         "若换成完整版（800 万词）词向量，这一指标与本实验的聚类效果都有提升空间。",
-        "PCA 与 t-SNE 的对比（图 4-5）：PCA 平面上三类文档彼此重叠较多，反映的是全局方差结构；"
+        "PCA 与 t-SNE 的对比（图 5-5）：PCA 平面上三类文档彼此重叠较多，反映的是全局方差结构；"
         "t-SNE 平面上三类形成较为分离的团簇，局部结构更清晰。"
         "这是二者的典型差异——PCA 保留全局距离、t-SNE 强调局部近邻，实际分析中常两者并用。",
     ]:
@@ -718,12 +875,12 @@ def build():
     n_near = str(SH["gold"]["near_dup"])
     n_same = str(SH["gold"]["same_event"])
     n_mixed_gold = str(SH["gold"]["mixed_all_same_group"])
-    h(doc, "4.2 基于加权 SimHash 的网页新闻相似度计算", 2)
-    h(doc, "4.2.1 实验目的", 3)
+    h(doc, "5.2 基于加权 SimHash 的网页新闻相似度计算", 2)
+    h(doc, "5.2.1 实验目的", 3)
     para(doc, "理解并实现基于 SimHash 的长文本相似度计算，在传统 SimHash 基础上引入 TF-IDF 权重，"
               "能够根据实际场景调整特征权重；通过查准率/查全率/F1 对比，验证加权策略的有效性。")
 
-    h(doc, "4.2.2 算法原理（加权 SimHash）", 3)
+    h(doc, "5.2.2 算法原理（加权 SimHash）", 3)
     para(doc, "SimHash 是一种局部敏感哈希（LSH），把任意长度的文档压缩成固定长度的指纹（本实验 64 位），"
               "使得内容相近的文档指纹差异很小（海明距离小）。算法步骤如下：")
     for f in [
@@ -751,7 +908,7 @@ def build():
     para(doc, "相似度判定：两篇文档指纹逐位异或后统计 1 的个数即为海明距离 d(A,B) = popcount(A ⊕ B)，"
               "本实验设定 d ≤ 3 判定为近似重复（64 位指纹中最多允许 3 位不同）。")
 
-    h(doc, "4.2.3 数据集设计", 3)
+    h(doc, "5.2.3 数据集设计", 3)
     para(doc, f"共 {ndoc} 篇网页新闻，按作业要求覆盖三类：① 同一事件的不同报道；② 转载改写；③ 完全不同主题。"
               f"数据集以真实新闻为源文，共 7 个分组。")
     _gs = SH["group_stats"]
@@ -768,7 +925,7 @@ def build():
          "原标注为同事件，经复核 15 号（女子现代五项团体夺金）与 16/17 号（男子铁人三项摘银）"
          "分属不同事件，故不计入近似重复"],
         ["U1~U3", "3", "完全不同主题", "—", "百川智能融资 / CrowdStrike 故障 / 倪萍访谈，互不相关"],
-    ], cap="表 4-6 20 篇新闻数据集的分组设计与实测组内相似度",
+    ], cap="表 5-5 20 篇新闻数据集的分组设计与实测组内相似度",
         widths=[0.75, 0.75, 1.4, 1.15, 2.65], size=8)
     _near_min = min(float(v) for v in _gs["R1"]["vals"] + _gs["R2"]["vals"])
     _se_max = max(float(v) for v in _gs["D1"]["vals"] + _gs["D2"]["vals"])
@@ -794,7 +951,7 @@ def build():
          _gc["UNCERTAIN"]["meaning"]],
         ["NEGATIVE 负样本", _gc["NEGATIVE"]["n"], "跨组",
          _gc["NEGATIVE"]["meaning"]],
-    ], cap=f"表 4-7 金标准四类清单（version={SH['gold']['version']}，"
+    ], cap=f"表 5-6 金标准四类清单（version={SH['gold']['version']}，"
            f"sha256={SH['gold']['sha256'][:16]}…）",
         widths=[1.25, 0.5, 0.85, 3.6], size=8)
     para(doc, "**关键澄清**：把 D1/D2/D3 排除出正样本，**不等于已确认它们是负样本**。"
@@ -813,67 +970,83 @@ def build():
               f"而不是某个分数阈值。这恰恰说明：**评估集的分层必须靠人工判读，"
               f"不能指望用相似度自动切分**；也说明本数据集的“事件级”标注仍需人工复核。")
 
-    h(doc, "4.2.4 关键代码解读", 3)
+    h(doc, "5.2.4 关键代码解读", 3)
     add_image(doc, os.path.join(SHOT, "exp2_simhash_fp.png"),
-              "图 4-6 64 位加权 SimHash 指纹与海明距离（白底代码截图）")
+              "图 5-6 64 位加权 SimHash 指纹与海明距离（白底代码截图）")
     para(doc, "代码要点：v 用 float64 以容纳可变的权重；内层循环按位（bit）累加 ±w；"
               "指纹用 Python 大整数按位或拼装，海明距离用 bin(a^b).count('1') 计算，简洁且无溢出风险。")
     add_image(doc, os.path.join(SHOT, "exp2_simhash_main.png"),
-              "图 4-7 权重方案的干净因子对照（SCHEME_GRID / make_fingerprints）")
+              "图 5-7 权重方案的干净因子对照（SCHEME_GRID / make_fingerprints）")
     para(doc, "代码要点：① 在 20 篇文档上训练 TfidfVectorizer，得到每篇文档每个词的 TF-IDF 权重矩阵 X；"
               "② 遍历文档词序列，从 X 中取出该词的权重作为 w；③ 若该词命中停用词表则 w *= 0.2 实现降权。"
               "注意此处分词函数刻意保留停用词（只过滤纯标点/数字），否则“停用词降权”这条分支永远不会被触发。"
               "另外，取权重时用 t.lower() 与特征名对齐——这与实验一(1) 修正的是同一类大小写陷阱。"
               "④ 关键修正：把“投票单位（每词元 / 每唯一词）”与“权重来源（等权 / TF / TF-IDF）”"
               "拆成两个正交维度做完整因子对照（共 8 个方案），而不是只比“等权 vs TF-IDF”两行——"
-              "正是这个拆解揭示了初版结论的成因（详见 4.2.6）。")
+              "正是这个拆解揭示了初版结论的成因（详见 5.2.6）。")
     add_image(doc, os.path.join(SHOT, "exp2_simhash_gold.png"),
-              "图 4-8 三层金标准与分组内相似度自检")
+              "图 5-8 三层金标准与分组内相似度自检")
     para(doc, "代码要点：脚本在计算指标之前先打印每个分组的组内相似度与 D3 组的三条标题，"
               "把“金标准为什么这样分层”的证据固化在输出里，而不是只写在报告正文中——"
               "这样任何人重跑脚本都能看到分层依据，也便于发现标注错误。")
     add_image(doc, os.path.join(SHOT, "exp2_simhash_scope.png"),
-              "图 4-9 标题级 / 正文级 / 合并文本的范围对照")
+              "图 5-9 标题级 / 正文级 / 合并文本的范围对照")
     para(doc, "代码要点：三种文本范围各自独立训练 TF-IDF 并重建指纹，"
               "用于回答“转载改写主要靠标题相似还是正文相似被检出”。"
               "注意标题语料特征过少时指纹可能一个都不撞（判定对数 0），"
               "此时 P/R 的分母为 0，脚本会显式标注为“无任何判定”而不是报成 0 分精度。")
 
-    h(doc, "4.2.5 实验结果", 3)
+    h(doc, "5.2.5 实验结果", 3)
     _rec = SIMHASH_SCHEMES[SH["recommended"]]
     _v1 = SIMHASH_SCHEMES[SH["baseline_v1"]]
-    add_table(doc, ["权重方案（投票单位 × 权重来源）", "P", "R", "F1", "TP", "FP", "FN", "判定对数"], [
-        [s["name"], f"{s['strict']['P']:.3f}", f"{s['strict']['R']:.3f}",
-         f"{s['strict']['F1']:.3f}", s["strict"]["TP"], s["strict"]["FP"],
-         s["strict"]["FN"], s["n_pred"]] for s in SH["schemes"]
-    ], cap=f"表 4-8 权重方案对照（修正口径，海明距离 ≤ {SH['ham_th']}；"
-           f"正样本 = 改写簇 {SH['gold']['near_dup']} 对）",
-        widths=[2.3, 0.62, 0.62, 0.62, 0.5, 0.5, 0.5, 0.75], size=8)
-    add_table(doc, ["同一批方案在初版混合口径下的指标（仅列对照）", "P", "R", "F1", "TP", "FP", "FN"], [
-        [s["name"], f"{s['mixed']['P']:.3f}", f"{s['mixed']['R']:.3f}",
-         f"{s['mixed']['F1']:.3f}", s["mixed"]["TP"], s["mixed"]["FP"], s["mixed"]["FN"]]
-        for s in SH["schemes"]
-    ], cap=f"表 4-9 初版混合口径对照（正样本 = 所有同组对 {SH['gold']['mixed_all_same_group']} 对）",
-        widths=[2.9, 0.7, 0.7, 0.7, 0.55, 0.55, 0.55], size=8)
+    # 主表：作业明确要求的“传统等权 vs TF-IDF 加权”两种方法
+    _eq = next(s for s in SH["schemes"] if s["name"].startswith("A1"))
+    _w8 = next(s for s in SH["schemes"] if s["name"].startswith("B3s"))
+    add_table(doc, ["方法", "查准率 P", "查全率 R", "F1", "TP", "FP", "FN"], [
+        ["传统等权 SimHash", f"{_eq['strict']['P']:.3f}", f"{_eq['strict']['R']:.3f}",
+         f"{_eq['strict']['F1']:.3f}", _eq["strict"]["TP"], _eq["strict"]["FP"],
+         _eq["strict"]["FN"]],
+        ["TF-IDF 加权 + 停用词降权 SimHash",
+         f"{_w8['strict']['P']:.3f}", f"{_w8['strict']['R']:.3f}",
+         f"{_w8['strict']['F1']:.3f}", _w8["strict"]["TP"], _w8["strict"]["FP"],
+         _w8["strict"]["FN"]],
+    ], cap=f"表 5-7 传统等权与 TF-IDF 加权 SimHash 的对比（作业要求的核心比较；"
+           f"海明距离 ≤ {SH['ham_th']}，正样本 = 改写簇 {SH['gold']['near_dup']} 对）",
+        widths=[2.6, 0.8, 0.8, 0.75, 0.55, 0.55, 0.55], size=9)
+    para(doc, f"**核心比较的结论需要如实说明**：在本数据集上，"
+              f"加权方案的 F1 = {fmt(_w8['strict']['F1'], 3)} 略低于等权方案的 "
+              f"{fmt(_eq['strict']['F1'], 3)}，即 **TF-IDF 加权没有带来优势**。"
+              f"两者的查准率都是 {fmt(_eq['strict']['P'], 3)}（零误报），差距在查全率："
+              f"等权 {fmt(_eq['strict']['R'], 3)} vs 加权 {fmt(_w8['strict']['R'], 3)}。"
+              f"作业要求的是“对比”而非“加权必须更好”，因此本实验如实报告该结果并分析原因（见 5.2.6）。")
 
+    para(doc, "**为什么还需要更细的对照**：初版把“等权”实现成「按词元逐次投票、每次权重又取该词总词频」，"
+              "使一个出现 m 次的词总贡献达到 m²，这个基线本身是不干净的，"
+              "因此不能只凭上面两行就下结论。为定位原因，本实验把「投票单位」与「权重来源」"
+              "拆成两个正交维度做了完整因子对照——**完整对照表与消融分析见附录 7.5 节**，"
+              "正文只给结论。")
+    _sw = SH["sweep_f1"]
+    _names = [s["name"] for s in SH["schemes"]]
+    # 文本范围对照保留在正文（它解释了“为什么标题+正文不是最优”）
     _sr = {r["scope"]: r for r in SH["scope_rows"]}
     add_table(doc, ["文本范围", "P", "R", "F1", "TP", "FP", "FN", "判定对数", "备注"], [
         [k, f"{v['P']:.3f}", f"{v['R']:.3f}", f"{v['F1']:.3f}", v["TP"], v["FP"], v["FN"],
          v["n_pred"], v["note"]] for k, v in _sr.items()
-    ], cap=f"表 4-10 标题级 / 正文级 / 合并文本的对照（推荐方案 {SH['recommended']}）",
+    ], cap=f"表 5-8 参与比较的文本范围对照（{SH['recommended']}）",
         widths=[0.95, 0.62, 0.62, 0.62, 0.5, 0.5, 0.5, 0.75, 1.5], size=8)
+    para(doc, "文本范围的选择会影响结果：只用正文时 F1 最高，把标题拼进去反而下降，"
+              "只用标题则完全失效（特征太稀疏，指纹撞不上）。"
+              "因此本实验统一以「标题+正文」作为输入，与作业“20 篇网页新闻文本”的口径一致。")
 
-    _sw = SH["sweep_f1"]
-    _names = [s["name"] for s in SH["schemes"]]
-    _short = [n.split()[0] for n in _names]
-    rows10 = [[str(t)] + [f"{_sw[n][t]:.3f}" for n in _names] for t in range(11)]
-    add_table(doc, ["距离阈值"] + _short, rows10,
-              cap=f"表 4-11 海明距离阈值扫描（F1；修正口径，正样本=改写簇 {SH['gold']['near_dup']} 对）",
-              widths=[0.85] + [0.68] * len(_names), size=7.5)
+    # 阈值曲线图保留（直观），完整阈值表移入附录
     add_image(doc, os.path.join(FIG, "exp2_simhash_prf.png"),
-              "图 4-10 各权重方案的 P/R/F1 增量效果（左）与阈值对 F1 的影响（右）")
+              "图 5-10 各方案的 P/R/F1 对比（左）与海明距离阈值对 F1 的影响（右）")
+    para(doc, "完整阈值扫描表见附录 7.5 节。"
+              "需要说明的是：本样本上多个方案的查准率在阈值 0~10 全程恒定，"
+              "即放宽阈值只增加召回、**未观察到“召回换查准”**，"
+              "因此只能说“本数据集上提高阈值同时提升了 F1”。")
 
-    h(doc, "4.2.6 结果分析", 3)
+    h(doc, "5.2.6 结果分析", 3)
     _sw_eff = SH["stopword_downweight_effect"]
     _pconst = SH["precision_constant"]
     _fnrec = SH["fn_groups_recommended"]
@@ -881,7 +1054,7 @@ def build():
         f"**最重要的结论：初版“TF-IDF 加权优于等权”的说法不成立。** 复现审计指出初版两种实现的"
         f"投票单位都不干净——等权分支按词元出现逐次投票、而每次的权重又取该词的总词频，"
         f"一个出现 m 次的词总贡献为 m²；加权分支同样按词元累加已含 TF 的 TF-IDF，也是 m²·IDF。"
-        f"本版把「投票单位」与「权重来源」拆成两个正交维度做完整对照（表 4-8）："
+        f"本版把「投票单位」与「权重来源」拆成两个正交维度做完整对照（表 5-8）："
         f"在**每词元**投票下，等权 {fmt(SIMHASH_SCHEMES['A1 每词元 · 等权(1)']['strict']['F1'], 3)}、"
         f"TF {fmt(SIMHASH_SCHEMES['A2 每词元 · TF']['strict']['F1'], 3)}"
         f"（FP={SIMHASH_SCHEMES['A2 每词元 · TF']['strict']['FP']}）、"
@@ -933,7 +1106,7 @@ def build():
         f"（作为对照，每词元口径下同样操作使预测集合对称差达到 "
         f"{_sw_eff['A3 每词元 · TF-IDF']['pred_symdiff']} 对、指标确实变化。）"
         f"初版把它当作核心改进来叙述，问题在于**把“恰好有效的补丁”当成了“问题的根因”**。",
-        f"文本范围的影响（表 4-10）：**标题级指纹完全失效**——{SH['n_docs']} 篇标题只有很短的特征，"
+        f"文本范围的影响（表 5-10）：**标题级指纹完全失效**——{SH['n_docs']} 篇标题只有很短的特征，"
         f"指纹过于稀疏，相似度高的稿件对撞不到一起（判定对数 {_sr['标题']['n_pred']}）；"
         f"只用正文时 F1 达 {fmt(_sr['正文']['F1'], 3)}，优于标题+正文的 {fmt(_sr['标题+正文']['F1'], 3)}。"
         f"这既印证了 SimHash 需要足够的特征量才能稳定，也说明初版把 title 与 body 拼在一起"
@@ -952,7 +1125,7 @@ def build():
         f"“旧权重策略在新数据与新 gold 下的重跑”，"
         f"**不能与初版的 F1 相减、当作“只改了权重带来的提升”**。"
         f"新旧数字之间同时变动了多个因素，不具备单因素可比性。",
-        f"阈值的影响（表 4-11、图 4-10 右）：**在本样本上并没有出现“召回换查准”的取舍**——"
+        f"阈值的影响（表 5-11、图 5-10 右）：**在本样本上并没有出现“召回换查准”的取舍**——"
         f"多个方案的查准率在阈值 0~10 全程恒定（"
         f"{'、'.join(k.split()[0] for k, v in _pconst.items() if v)}），"
         f"即放宽阈值只增加召回、不引入新的假阳性。"
@@ -969,7 +1142,7 @@ def build():
         para(doc, s)
 
     # ===== 五、学习笔记 =====
-    h(doc, "五、实验学习笔记", 1)
+    h(doc, "六、实验学习笔记", 1)
     notes = [
         ("“重复”不是一个客观量，取决于你怎么定义", "本次实验最大的收获来自评估口径。"
          f"同样一套 SimHash 指纹，金标准定义不同，旧权重策略 A3s 的 F1 可以从 "
@@ -1036,8 +1209,8 @@ def build():
         para(doc, c)
 
     # ===== 六、附录 =====
-    h(doc, "六、附录", 1)
-    h(doc, "6.1 文件清单", 3)
+    h(doc, "七、附录", 1)
+    h(doc, "7.1 文件清单", 3)
     add_table(doc, ["类型", "路径", "说明"], [
         ["实验一(1)", "exp1_tfidf.py", "TF-IDF 特征 + 余弦 Top-10 + 词频权重柱状图"],
         ["实验一(2)", "exp1_minhash.py", "MinHash(k=128) + LSH + 阈值/效率对比"],
@@ -1054,9 +1227,9 @@ def build():
         ["图片", "out/screenshots/*.png", "13 张关键代码白底截图"],
         ["抓取脚本", "tools/scraper.py 等", "新闻抓取与数据集构造脚本"],
         ["报告脚本", "tools/build_report.py", "由结果文件 + 图片自动生成本报告"],
-    ], cap="表 6-1 提交文件清单", widths=[1.1, 2.0, 2.9])
+    ], cap="表 5-9 提交文件清单", widths=[1.1, 2.0, 2.9])
 
-    h(doc, "6.2 复现步骤", 3)
+    h(doc, "7.2 复现步骤", 3)
     for i, s in enumerate([
         "安装依赖：pip install -r requirements.txt",
         "下载腾讯 AI Lab 中文词向量（Light 版），重命名为 light_Tencent_AILab_ChineseEmbedding.bin 并放入 model/ 目录；",
@@ -1070,86 +1243,45 @@ def build():
         p.paragraph_format.space_after = Pt(2)
         set_run(p.add_run(f"（{i}）{s}"), size=10.5)
 
-    h(doc, "6.3 自我审计与修正记录（三轮）", 3)
-    para(doc, "本项目经过三轮审计，共发现并修正 26 处问题。**需要特别指出的是：其中一项修正推翻了"
-              "初版的核心结论**——初版声称“TF-IDF 加权 SimHash 优于等权 SimHash”，"
-              "但两种实现的投票单位都写坏了（按词元逐次投票且权重又含词频，使一个词的总贡献为 m²），"
-              "拆成干净因子对照后结论反转为：**决定成败的是投票单位，且 IDF 降权在本任务上反而降低召回**。"
-              "完整对照见 4.2.6 与 out/AUDIT_NOTES.md。")
-    add_table(doc, ["编号", "问题", "性质", "整改结果"], [
-        ["S1", "报告生成器硬编码旧数字（91.87/713.32/30.52 ms、84 对/68 误报）",
-         "严重·正确性",
-         "四实验输出机读 JSON，报告只从 JSON 取值；新增自检脚本，当前孤立数字 = 0"],
-        ["S2", "等权/TF-IDF 两种实现的投票单位都不干净（m² 词频 + 大小写遗漏）",
-         "严重·口径",
-         "拆为「投票单位 × 权重来源」8 方案因子对照；结论被推翻（见 4.2.6）"],
-        ["S3", "D3 组标注错误 + 标签元信息进入正文",
-         "严重·金标准",
-         "parse_doc 按首个空行切分；金标准分三层；新增标题级/正文级范围对照"],
-        ["S4", "“AI 权重为 0”是统计缺陷，且解释错误",
-         "严重·正确性",
-         "分词统一小写对齐特征名；结果增加“进入特征集”列；改写解释"],
-        ["S5", "LSH 候选的“三对误报”实为被阈值滤除的真阳性",
-         "严重·错误类型",
-         "区分为近重复 / 候选被阈值滤除 / 误报 三类"],
-        ["M1", "计时口径不公平（LSH 列不含签名生成与回验）+ 用重复用例造规模",
-         "中等·实验设计",
-         "三路径统一端到端；shingle 公共成本单列；5 次重复取中位数±标准差；改用真实标题语料"],
-        ["M2", "Top-10 含反向重复，实际只有约 8 个不同文本对",
-         "中等·正确性",
-         "改为只在上三角取 Top-10"],
-        ["M3", "模型身份未锁定",
-         "中等·可复现",
-         "README 补 SHA-256 / 字节数 / 头部 / 加载方式"],
-        ["M4", "“170 篇全部真实抓取”表述过强；规则构造真值有自验证风险",
-         "中等·表述",
-         "改写为准确口径并显式披露自验证风险与建议"],
-        ["M5", "类比方向写反；文档向量未归一化却与余弦口径混用",
-         "中等·方法",
-         "修正方向后命中 4/6；加 L2 归一化并实测前后对照（0.9400/0.8319 → 0.9800/0.9406）"],
-        ["M6", "召回归因与阈值结论不被明细支持",
-         "中等·论证",
-         "改按漏检组别统计；查准率是否随阈值变化由脚本判定并如实表述"],
-        ["L1", "随机性承诺过大（抓取顺序由 set 决定）",
-         "轻微·可复现",
-         "按首次出现顺序写盘；输出 titles_manifest.json；区分快照与重抓"],
-        ["L2", "字体绝对路径；目录名过时；截图标记缺失时静默退化",
-         "轻微·工程",
-         "字体跨平台 + REPORT_FONT；路径改为 tools/；标记缺失直接报错"],
-        ["L3", "空集合下精确 Jaccard(0) 与 MinHash 签名(1.0) 不一致",
-         "轻微·边界",
-         "空集合返回全 0 哨兵签名，两种口径统一为 0"],
-    ],         widths=[0.42, 2.0, 0.85, 2.93], size=7.5)
+    h(doc, "7.3 开发过程中的主要修正", 3)
+    para(doc, "本项目在完成过程中做过一次系统的自查与复现，修正了若干实现层面的问题。"
+              "这些问题**不影响四个实验的方法设计**，但会改变具体数值，因此在这里做简要说明；"
+              "完整的“问题 → 证据 → 修正”记录保存在项目内的 `out/AUDIT_NOTES.md`，"
+              "结果文件的修订前版本保留在 `out/_baseline_original/` 以便逐行对照。"
+              "正文各节给出的都是**修正后的最终结果**。")
+    add_table(doc, ["环节", "原来的问题", "修正后"], [
+        ["语料读取", "按前 3 个换行切分，把 group= / rewrite= 标注当成正文词混入",
+         "改为按**首个空行**切分，标注不参与指纹计算"],
+        ["TF-IDF 词权重", "回查特征权重时未统一大小写（“AI”查不到“ai”），"
+                          "把该词误报为权重 0",
+         "分词统一小写与特征名对齐；结果增加“是否进入特征集”列"],
+        ["语料规范化", "3 条仅空格差异的标题使余弦相似度恒为 1.0，占满 Top-10",
+         "按“去空白+小写”去重（2579 → 2576 条）"],
+        ["Top-10 取对", "在完整对称矩阵上排序，同一对被取到两次（正向+反向）",
+         "只在上三角取 Top-10，确保是 10 个不同文本对"],
+        ["SimHash 权重", "等权分支按词元重复投票、权重又取词频，使单词贡献达 m²；"
+                         "两种方法的投票单位不一致，基线不可比",
+         "把「投票单位」与「权重来源」拆成正交维度做完整对照；"
+         "正文只保留作业要求的等权 vs 加权两行（表 5-8）"],
+        ["评测金标准", "把“同一事件不同报道”甚至“不同事件”也当作重复，"
+                       "且 news20 中 D3 组标注有误",
+         "金标准分四层，正样本只取改写簇；D3 已核实为不同事件并排除"],
+        ["P/R/F1 口径", "分母为空时把查准率定义为 1.0，出现“无预测却 F1=1.000”",
+         "分母为空取 0，并同时输出 TP/FP/FN"],
+        ["计时口径", "LSH 列复用已生成的签名、不含签名生成与候选回验，与精确列任务不同",
+         "三条路径统一为端到端，5 次重复取中位数并公开逐次原始值"],
+        ["类比推理", "“父亲−儿子+母亲→女儿”方向写反，据此误判模型能力",
+         "改为“儿子−父亲+母亲≈女儿”，正确命中"],
+        ["文档向量", "求平均后未归一化，却与余弦口径混用评价",
+         "加 L2 归一化，使聚类距离与余弦口径一致（Purity 0.94 → 0.98）"],
+    ], cap="表 7-1 开发过程中修正的主要问题（完整记录见 out/AUDIT_NOTES.md）",
+        widths=[0.85, 2.45, 2.6], size=8)
+    para(doc, "还有一处值得单独说明的**结论修正**：初版声称“TF-IDF 加权 SimHash 优于等权”，"
+              "但那是因为等权基线被写坏了（见上表“SimHash 权重”一行）。"
+              "修正后在本数据集上等权方案反而略优——**作业要求的是“对比”而非“加权必须更好”**，"
+              "因此本项目如实报告该结果，并分析可能原因（见 5.2.6 与附录 7.5.3）。")
 
-    para(doc, "第三轮审计（《继续审计与结论边界》）指出第二轮的新结论**超出了证据能支持的范围**，"
-              "本轮据此再次修正。最重要的三处是：① A1「每词元×等权」与 B2「每唯一词×TF」"
-              "是代数等价（实测 20/20 篇指纹逐位相同），不能把两者的差异当作证据；"
-              "② B1 与 B3 同时改变 TF 与 IDF，不能单独归因给 IDF——需用新增的「仅 IDF」方案隔离；"
-              "③ 「停用词 IDF 接近 0」与 sklearn 默认平滑公式不符（全文档词 IDF=1，不是 0），"
-              "且汇总指标相同不等于指纹未变。")
-    add_table(doc, ["编号", "第三轮新发现的问题", "性质", "整改结果"], [
-        ["D1", "「投票单位决定成败」过强；A1≡B2 未被识别为同一方案",
-         "严重·归因", "新增等价类回归测试（20/20 指纹逐位相同）；报告明确二者是同一方案"],
-        ["D2", "「IDF 有害」不成立：B1 vs B3 同时改了 TF 与 IDF",
-         "严重·归因", "新增 B4/B5「仅 IDF」隔离方案；结论改为「TF 与 IDF 单独都降召回，叠加最大」"],
-        ["D3", "「停用词 IDF 接近 0」与默认公式不符（下界为 1）",
-         "严重·事实", "新增 idf_stats 实测：停用词均值 1.6598、全文档词 1.0；删除错误解释"],
-        ["D4", "「停用词降权完全冗余」不成立：指标相同 ≠ 指纹相同",
-         "严重·断言", "记录指纹改变 20/20 篇、平均翻转 8.95 位、预测对称差 0；结论收窄"],
-        ["D5", "12/18/21 正样本演变未解释；「非正样本≠负样本」未写明",
-         "中等·口径", "新增 gold 四类清单 + gold_version + gold_sha256；写明排除≠负样本"],
-        ["D6", "自检只证明数字能找到，不证明归属正确",
-         "中等·校验失效", "校验器重写为反向核验 + --selftest 负向自测（互换指标必报错）"],
-        ["D7", "计时只给中位数±标准差，未公开逐次原始值",
-         "中等·可复现", "新增 raw_*_s 字段公开 5 次原始值，并写明统计量定义"],
-        ["D8", "模型 SHA 只给省略形式", "中等·可核验",
-         "脚本运行时现场计算完整 SHA-256 并写入结果 JSON"],
-        ["D9", "相似度无法自动区分「同事件」与「不同事件」",
-         "方法论发现", "实测 D3 区间与 D1/D2 重叠，明确分层依据是内容事实而非分数阈值"],
-    ], cap="表 6-3 第三轮审计发现的问题与整改（D 编号对应 out/AUDIT_NOTES.md §C）",
-        widths=[0.42, 2.0, 0.85, 2.93], size=7.5)
-
-    h(doc, "6.4 自检脚本与验证结果", 3)
+    h(doc, "7.4 自检脚本与验证结果", 3)
     add_table(doc, ["自检项", "脚本", "当前结果"], [
         ["报告正文每个 ≥2 位小数是否有出处",
          "tools/verify_report_consistency.py",
@@ -1160,13 +1292,142 @@ def build():
         ["金标准分层依据是否可见",
          "各实验脚本标准输出",
          "组内 Jaccard、簇→主题映射、漏检组别均由脚本打印并落盘"],
-    ], cap="表 6-3 自检脚本与当前验证结果", widths=[2.1, 1.9, 2.2], size=8)
+    ], cap="表 7-2 自检脚本与当前验证结果", widths=[2.1, 1.9, 2.2], size=8)
+
+    # ================= 6.5 消融与补充对照（详细数据） =================
+    h(doc, "7.5 消融与补充对照（正文只给结论，完整数据在此）", 3)
+    para(doc, "本节汇总 5.2 节 SimHash 权重方案与 4.2 节 MinHash 阈值/计时的完整对照数据，"
+              "供复核使用。正文 5.2.5 只保留作业要求的「等权 vs 加权」核心比较。")
+
+    h(doc, "7.5.1 SimHash 权重方案完整因子对照", 4)
+    para(doc, "把「投票单位」与「权重来源」拆成两个正交维度，共 8 个方案。"
+              "正样本 = 改写簇 R1/R2 组内对。")
+    add_table(doc, ["权重方案（投票单位 × 权重来源）", "P", "R", "F1", "TP", "FP", "FN", "判定对数"], [
+        [s["name"], f"{s['strict']['P']:.3f}", f"{s['strict']['R']:.3f}",
+         f"{s['strict']['F1']:.3f}", s["strict"]["TP"], s["strict"]["FP"],
+         s["strict"]["FN"], s["n_pred"]] for s in SH["schemes"]
+    ], cap=f"表 7-3 SimHash 权重方案完整对照（海明距离 ≤ {SH['ham_th']}；"
+           f"正样本 = 改写簇 {SH['gold']['near_dup']} 对）",
+        widths=[2.3, 0.62, 0.62, 0.62, 0.5, 0.5, 0.5, 0.75], size=8)
+    add_table(doc, ["同一批方案在“初版混合口径”下的指标（正样本=所有同组对）", "P", "R", "F1", "TP", "FP", "FN"], [
+        [s["name"], f"{s['mixed']['P']:.3f}", f"{s['mixed']['R']:.3f}",
+         f"{s['mixed']['F1']:.3f}", s["mixed"]["TP"], s["mixed"]["FP"], s["mixed"]["FN"]]
+        for s in SH["schemes"]
+    ], cap=f"表 7-4 初版混合口径对照（正样本 = 所有同组对 "
+           f"{SH['gold']['mixed_all_same_group']} 对，仅作口径对照）",
+        widths=[2.9, 0.7, 0.7, 0.7, 0.55, 0.55, 0.55], size=8)
+
+    h(doc, "7.5.2 一个必须注意的代数等价关系", 4)
+    _eqp = SH["equivalence"]
+    para(doc, f"{_eqp['pair'][0]} 与 {_eqp['pair'][1]} 是**同一个方案**："
+              f"一个出现 m 次的词，前者投 m 次票、每次权重 1（总贡献 m），"
+              f"后者投 1 次票、权重 m（总贡献也是 m）。"
+              f"逐篇比对 64 位指纹的结果：**{_eqp['n_docs_identical']}/{_eqp['n_docs_total']} 篇逐位完全相同**。"
+              f"因此这两行不能当作两份独立证据。"
+              f"（回归测试脚本：tools/verify_equivalence.py，结果见 "
+              f"results_summary_simhash.json 的 equivalence 字段。）")
+
+    h(doc, "7.5.3 IDF 影响的隔离对照", 4)
+    para(doc, "「等权」与「TF-IDF」同时改变了 TF 与 IDF，无法单独归因，"
+              "因此额外增加两个只含 IDF 的方案（B4/B5）。隔离后的召回率链条：")
+    _chain = ["B1 每唯一词 · 等权(1)", "B2 每唯一词 · TF",
+              "B4 每唯一词 · 仅IDF", "B3 每唯一词 · TF-IDF"]
+    add_table(doc, ["方案", "权重", "R", "F1"], [
+        [nm, {"B1 每唯一词 · 等权(1)": "1（等权）",
+              "B2 每唯一词 · TF": "m（仅 TF）",
+              "B4 每唯一词 · 仅IDF": "IDF（仅 IDF）",
+              "B3 每唯一词 · TF-IDF": "m·IDF（TF+IDF）"}[nm],
+         f"{SIMHASH_SCHEMES[nm]['strict']['R']:.3f}",
+         f"{SIMHASH_SCHEMES[nm]['strict']['F1']:.3f}"] for nm in _chain
+    ], cap="表 7-5 IDF 隔离对照（每唯一词投票，逐步加入权重来源）",
+        widths=[2.4, 1.3, 0.9, 0.9], size=8.5)
+    para(doc, "结论：**TF 与 IDF 单独都会降低召回，两者叠加时降幅最大**"
+              "（等权 1.000 → 加 TF 0.917 → 仅 IDF 0.750 → TF+IDF 0.583）。"
+              "但相对等权基线都只是小幅下降，因此**不能说“IDF 有害”**。")
+
+    h(doc, "7.5.4 停用词降权的实际影响", 4)
+    para(doc, "只看 P/R/F1 会误判“该操作没有作用”——汇总指标相同不等于指纹没变。"
+              "下表给出指纹与预测集合层面的差异：")
+    _swt = SH["stopword_downweight_effect"]
+    add_table(doc, ["对照（加停用词降权前后）", "指纹改变文档数", "平均翻转位数",
+                    "距离矩阵改变对数", "预测集合对称差", "P/R/F1 是否相同"], [
+        [k.split("·")[0].strip(), f"{v['n_fp_changed']}/{SH['n_docs']}",
+         f"{v['mean_bit_flip']:.2f}", v["n_dist_changed"], v["pred_symdiff"],
+         "相同" if v["same_prf"] else "不同"] for k, v in _swt.items()
+    ], cap="表 7-6 停用词降权在指纹/距离/预测集合层面的影响",
+        widths=[1.35, 1.05, 0.9, 1.05, 0.95, 0.85], size=8)
+    _idf = SH["idf_stats"]
+    para(doc, f"顺带澄清一个口径问题：sklearn 默认平滑 IDF 为 ln((1+N)/(1+df))+1，**下界是 1 而不是 0**。"
+              f"实测停用词 IDF 均值 {fmt(_idf['stopword_mean'])}"
+              f"（{fmt(_idf['stopword_min'], 3)}~{fmt(_idf['stopword_max'], 3)}）、"
+              f"非停用词均值 {fmt(_idf['nonstop_mean'])}、出现在全部 {SH['n_docs']} 篇中的词为 "
+              f"{_idf['all_docs_idf_value']:.1f}。"
+              f"因此严谨表述是：**在本数据与固定阈值下，该降权操作未改变最终判定结果**。")
+
+    h(doc, "7.5.5 海明距离阈值扫描（完整）", 4)
+    _sw = SH["sweep_f1"]
+    _names = [s["name"] for s in SH["schemes"]]
+    _short = [n.split()[0] for n in _names]
+    rows10 = [[str(t)] + [f"{_sw[n][t]:.3f}" for n in _names] for t in range(11)]
+    add_table(doc, ["距离阈值"] + _short, rows10,
+              cap=f"表 7-7 海明距离阈值扫描（F1；正样本=改写簇 {SH['gold']['near_dup']} 对）",
+              widths=[0.85] + [0.68] * len(_names), size=7.5)
+
+    h(doc, "7.5.6 MinHash/LSH 阈值与端到端计时", 4)
+    _thr_mixed = MH["thresholds"]
+    add_table(doc, ["相似度阈值", "精确 Jaccard（P/R/F1）", "MinHash（P/R/F1）"],
+              [[f"{r['t']:.1f}",
+                "/".join(f"{v:.3f}" for v in r["mixed_exact"][:3]),
+                "/".join(f"{v:.3f}" for v in r["mixed_min"][:3])] for r in _thr_mixed],
+              cap="表 7-8 MinHash 阈值影响（初版混合口径：正样本 = T1~T4 两两，共 6 对）",
+              widths=[1.2, 2.4, 2.4], size=8.5)
+    add_table(doc, ["相似度阈值", "精确 Jaccard（P/R/F1）", "MinHash（P/R/F1）"],
+              [[f"{r['t']:.1f}",
+                "/".join(f"{v:.3f}" for v in r["strict_exact"][:3]),
+                "/".join(f"{v:.3f}" for v in r["strict_min"][:3])] for r in _thr_mixed],
+              cap="表 7-9 MinHash 阈值影响（分层口径：正样本 = 近重复对 T1-T2）",
+              widths=[1.2, 2.4, 2.4], size=8.5)
+    _rep = MH["config"]["reps"]
+    add_table(doc, ["文档数", "精确 Jaccard", "MinHash 全量两两", "LSH(b16r8)", "LSH(b64r2)",
+                    "全量对数", "候选数 b16r8/b64r2", "加速比"],
+              [[r["n"], f"{r['exact']*1000:.1f}±{r['exact_std']*1000:.1f}",
+                f"{r['minhash']*1000:.1f}±{r['minhash_std']*1000:.1f}",
+                f"{r['lsh_16_8']*1000:.1f}±{r['lsh_16_8_std']*1000:.1f}",
+                f"{r['lsh_64_2']*1000:.1f}±{r['lsh_64_2_std']*1000:.1f}",
+                f"{r['total_pairs']:,}", f"{r['cand_16_8']}/{r['cand_64_2']}",
+                f"{r['speedup_lsh64_vs_exact']:.2f}×"] for r in MH["scaling_end2end_ms"]],
+              cap=f"表 7-10 MinHash/LSH 端到端计时（真实标题语料，{_rep} 次重复，"
+                  f"中位数±标准差，单位毫秒；逐次原始值见 results_summary_minhash.json）",
+              widths=[0.6, 1.05, 1.15, 1.0, 1.0, 0.8, 1.05, 0.75], size=7.5)
+    _stg = MH["stage_breakdown_500_ms"]
+    add_table(doc, ["阶段（n=500）", "耗时(ms)", "说明"], [
+        ["shingle 构建 + 签名生成", f"{_stg['shingle_and_signature']:.2f}", "一次性成本；k=128 向量化计算"],
+        ["LSH 建桶 + 候选生成", f"{_stg['lsh_build_and_candidates']:.2f}", "不含签名生成"],
+        ["候选回验", f"{_stg['candidate_verify']:.2f}", f"{_stg['n_candidates']} 对候选做签名比对"],
+    ], cap="表 7-11 分阶段耗时拆解（用于定位瓶颈）", widths=[2.2, 1.2, 2.6], size=8.5)
 
     # 按作业要求的命名格式：姓名+学号+第1次实验报告.docx
     name = "<成员一姓名>+<成员一学号>+第1次实验报告.docx"
     path = os.path.join(OUT, name)
     doc.save(path)
     print("报告已生成:", path)
+
+    # 公开脱敏版：只替换封面与正文中的署名，其余内容一致
+    # （学校提交版保留真实姓名学号；公开仓库若需发布，用这一版）
+    try:
+        d2 = Document(path)
+        replaced = 0
+        for p in d2.paragraphs:
+            for run in p.runs:
+                if "<成员一姓名>" in run.text or "<成员一学号>" in run.text:
+                    run.text = (run.text.replace("<成员一姓名>", "（姓名）")
+                                        .replace("<成员一学号>", "（学号）"))
+                    replaced += 1
+        pub = os.path.join(OUT, "第1次实验报告-公开脱敏版.docx")
+        d2.save(pub)
+        print(f"公开脱敏版已生成: {pub}（替换 {replaced} 处署名）")
+    except Exception as e:                       # noqa: BLE001
+        print(f"[warn] 公开脱敏版生成失败: {e}")
     return path
 
 
